@@ -16,7 +16,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
     def __init__(self, branch_name, coords_shape, waveform_gen, tempering_kwargs, waveform_gen_kwargs, waveform_like_kwargs, acs, num_repeats, transform_fn, priors, inner_moves, df, 
         Tmax=np.inf, betas_all = None, **kwargs):
         
-        Move.__init__(self, **kwargs)
+        # Move.__init__(self, **kwargs)
         StretchMove.__init__(self, **kwargs)
 
         self.ntemps, self.nwalkers, self.nleaves_max, self.ndim = coords_shape
@@ -332,7 +332,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         new_state.log_like[:] = self.acs.likelihood()  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
             
         # assert np.abs(new_state.log_like[0] - self.acs.get_ll(include_psd_info=True)).max() < 1e-4
-        breakpoint()
+        # breakpoint()
         return new_state, accepted
 
     def replace_residuals(self, old_state, new_state):

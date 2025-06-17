@@ -335,7 +335,7 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
     # rj_moves_in.append(rj_move_prior)
     # rj_moves_in_frac.append(gb_info["pe_info"]["rj_prior_fraction"])
 
-    ranks_needed_here = 16
+    ranks_needed_here = 0
     gb_kwargs_rj2 = dict(
         waveform_kwargs=waveform_kwargs,
         parameter_transforms=gb_info["transform"],
@@ -408,7 +408,7 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
     moves = GFCombineMove([rj_serial_search_move, gb_move, rj_move_prior])
     return SetupInfoTransfer(
         name="gb",
-        in_model_moves=[moves],  # [gb_move] + rj_moves,  # [gb_move] + rj_moves, # probably better to run them all together
+        in_model_moves=[], #[moves],  # [gb_move] + rj_moves,  # [gb_move] + rj_moves, # probably better to run them all together
         # rj_moves=rj_moves,
     )
 
@@ -497,7 +497,8 @@ class WrapEMRI:
     def __call__(self, *args, **kwargs):
         AET_t = cp.asarray(self.waveform_gen_td(*args, **kwargs))
         fft_input = AET_t * tukey(AET_t.shape[-1], self.tukey_alpha, xp=cp)[None, :]
-        AET_f = self.dt * cp.fft.rfft(fft_input, axis=-1)[None, :self.nchannels, self.start_freq_ind: self.end_freq_ind]
+        # TODO: adjust this if it needs 3rd axis?
+        AET_f = self.dt * cp.fft.rfft(fft_input, axis=-1)[:self.nchannels, self.start_freq_ind: self.end_freq_ind]
         return AET_f
 
 
@@ -575,7 +576,7 @@ def setup_emri_functionality(gf_branch_info, curr, acs, priors, state):
     
     return SetupInfoTransfer(
         name="emri",
-        in_model_moves=[],  # [emri_move],
+        in_model_moves=[emri_move],
     )
 
 
@@ -760,7 +761,7 @@ def get_global_fit_settings(copy_settings_file=False):
     # limits on parameters
     delta_safe = 1e-5
     A_lims = [7e-26, 1e-19]
-    f0_lims = [0.05e-3, 2.5e-2]
+    f0_lims = [0.05e-3, 2.5e-2]  # TODO: this upper limit leads to an issue at 23 mHz where there is no source?
     m_chirp_lims = [0.001, 1.0]
     # now with negative fdots
     fdot_max_val = get_fdot(f0_lims[-1], Mc=m_chirp_lims[-1])
@@ -1264,7 +1265,7 @@ def get_global_fit_settings(copy_settings_file=False):
             "gb": all_gb_info,
             # "mbh": all_mbh_info,
             "psd": all_psd_info,
-            # "emri": all_emri_info,
+            "emri": all_emri_info,
         },
         "general": all_general_info,
         "rank_info": rank_info,
