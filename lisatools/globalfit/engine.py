@@ -2,6 +2,7 @@ from __future__ import annotations
 from eryn.ensemble import EnsembleSampler
 from collections import namedtuple
 from typing import Optional
+from lisatools.analysiscontainer import AnalysisContainerArray
 
 __all__ = ["GlobalFitInfo", "GlobalFitEngine"]
 
