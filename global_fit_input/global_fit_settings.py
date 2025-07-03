@@ -483,7 +483,7 @@ def setup_psd_functionality(gf_branch_info, curr, acs, priors, state):
 
     return SetupInfoTransfer(
         name="psd",
-        in_model_moves=[],  # [psd_move],
+        in_model_moves=[psd_move],
     )
 
 class WrapEMRI:
@@ -501,6 +501,58 @@ class WrapEMRI:
         AET_f = self.dt * cp.fft.rfft(fft_input, axis=-1)[:self.nchannels, self.start_freq_ind: self.end_freq_ind]
         return AET_f
 
+def get_emri_injection_parameters(filename='emri_out/true_params.npz'):
+    # # optimal snr 50
+    # M = 1e6; mu = 10; a = 0.99; p0 = 6.435; e0 = 0.73; x_I0 = 1.0
+    # dl = 2.25997; 
+    # qS = 0.8 ; phiS = 2.2; qK = 1.6; phiK = 1.2; 
+    # Phi_phi0 = 2.0; Phi_theta0 = 0.0; Phi_r0 = 3.0
+
+    # params = [M, mu, a, p0, e0, x_I0, dl, qS, phiS, qK, phiK, Phi_phi0, Phi_theta0, Phi_r0]
+    params = np.load(filename)['arr_0']
+    
+    injection_params = np.asarray(params)
+
+    injection_params[0] = np.log(injection_params[0])
+    injection_params[7] = np.cos(injection_params[7])
+    injection_params[9] = np.cos(injection_params[9])
+
+    # now remove params 5 and 12
+    injection_params = np.delete(injection_params, [5, 12])
+
+    return injection_params
+
+def get_emri_priors(delta=None):
+    inj = get_emri_injection_parameters()
+
+    priors_emri = {
+        5: uniform_dist(0.01, 100.0),  # dist in Gpc
+        6: uniform_dist(-0.99999, 0.99999),  # qS
+        7: uniform_dist(0.0, 2 * np.pi),  # phiS
+        8: uniform_dist(-0.99999, 0.99999),  # qK
+        9: uniform_dist(0.0, 2 * np.pi),  # phiK
+        10: uniform_dist(0.0, 2 * np.pi),  # Phi_phi0
+        11: uniform_dist(0.0, 2 * np.pi),  # Phi_r0
+    }
+
+    if delta is not None:
+        print('use narrow emri priors')
+        amax = min(0.99999, inj[2] * ( 1 + delta)) # ensure prior is compatible with FEW
+        priors_emri[0] = uniform_dist( (1 - delta) * inj[0], (1 + delta) * inj[0])  # M total mass
+        priors_emri[1] = uniform_dist( (1 - delta) * inj[1], (1 + delta) * inj[1])  # mu
+        priors_emri[2] = uniform_dist( (1 - delta) * inj[2], amax)  # a
+        priors_emri[3] = uniform_dist( (1 - delta) * inj[3], (1 + delta) * inj[3])  # p0
+        priors_emri[4] = uniform_dist( (1 - delta) * inj[4], (1 + delta) * inj[4])  # e0
+    
+    else:
+        print('use wide emri priors')
+        priors_emri[0] = uniform_dist(np.log(5e5), np.log(5e6)) # M total mass
+        priors_emri[1] = uniform_dist(1.0, 100.0)  # mu
+        priors_emri[2] = uniform_dist(0.01, 0.999)  # a
+        priors_emri[3] = uniform_dist(5.0, 16.0) # p0
+        priors_emri[4] = uniform_dist(0.001, 0.8) # e0
+    return ProbDistContainer(priors_emri)
+
 
 def setup_emri_functionality(gf_branch_info, curr, acs, priors, state):
 
@@ -516,16 +568,20 @@ def setup_emri_functionality(gf_branch_info, curr, acs, priors, state):
     num_emris = gf_branch_info.nleaves_max["emri"]
     ndim = gf_branch_info.ndims["emri"]
     # need to inject emris since they are not in the data set yet. 
-    emri_inj_params = priors["emri"].rvs(size=(num_emris,))
-    emri_inj_params_in = emri_info["transform"].both_transforms(emri_inj_params)   
+    # emri_inj_params = priors["emri"].rvs(size=(num_emris,))
+    # emri_inj_params_in = emri_info["transform"].both_transforms(emri_inj_params)   
+
+    emri_inj_params = get_emri_injection_parameters()
+
     start = curr.general_info["start_freq_ind"]
     end = curr.general_info["end_freq_ind"]
-    for inj in emri_inj_params_in:
-        AET_f = emri_gen(*inj)
-        # this will go into every residual because it is the data
-        for i in range(nwalkers):
-            # TODO: let's chat about how to work all the "remove from" / "add from" etc.
-            acs.remove_signal_from_residual(AET_f, data_index=np.array([i]))
+
+    # for inj in emri_inj_params_in:
+    #     AET_f = emri_gen(*inj)
+    #     # this will go into every residual because it is the data
+    #     for i in range(nwalkers):
+    #         # TODO: let's chat about how to work all the "remove from" / "add from" etc.
+    #         acs.remove_signal_from_residual(AET_f, data_index=np.array([i]))
     
     emri_start_params = emri_inj_params[None, None] * (1 + 1e-6 * np.random.randn(ntemps, nwalkers, num_emris, ndim))
     emri_start_params_in = emri_info["transform"].both_transforms(emri_start_params.reshape(-1, ndim)).reshape(emri_start_params.shape[:-1] + (-1,))   
@@ -622,15 +678,17 @@ def get_global_fit_settings(copy_settings_file=False):
     ###############################
     ###############################
 
-    ldc_source_file = "LDC2_sangria_training_v2.h5"
+    #ldc_source_file = "LDC2_sangria_training_v2.h5"
+    ldc_source_file = "emri_out/sangria_noise.h5"
     with h5py.File(ldc_source_file, "r") as f:
         tXYZ = f["obs"]["tdi"][:]
 
-        # remove sources
-        for source in ["mbhb"]:  # , "dgb", "igb"]:  # "vgb" ,
-            change_arr = f["sky"][source]["tdi"][:]
-            for change in ["X", "Y", "Z"]:
-                tXYZ[change] -= change_arr[change]
+        if ldc_source_file == "LDC2_sangria_training_v2.h5":
+            # remove sources
+            for source in ["mbhb"]:  # , "dgb", "igb"]:  # "vgb" ,
+                change_arr = f["sky"][source]["tdi"][:]
+                for change in ["X", "Y", "Z"]:
+                    tXYZ[change] -= change_arr[change]
 
         # tXYZ = f["sky"]["dgb"]["tdi"][:]
         # tXYZ["X"] += f["sky"]["dgb"]["tdi"][:]["X"]
@@ -677,7 +735,9 @@ def get_global_fit_settings(copy_settings_file=False):
     # TODO: check this. 
     # This is here because of data storage size 
     # and an issue I think with a zero in the response psd
-    end_freq_ind = int(0.030 / df)  # len(A_inj) - 1
+    # end_freq_ind = len(Af) - 1
+    print('cutting the frequency range')
+    end_freq_ind = int(0.050 / df)  # len(A_inj) - 1
     # end_freq_ind = int(0.007 / df)  # len(A_inj) - 1
     
     A_inj, E_inj = (
@@ -685,15 +745,17 @@ def get_global_fit_settings(copy_settings_file=False):
         Ef[start_freq_ind:end_freq_ind],
     )
 
+    print("A_inj shape", A_inj.shape)
+
     data_length = len(A_inj)
     fd = (np.arange(data_length) + start_freq_ind) * df
     
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [4]
+    gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
-    nwalkers = 36
-    ntemps = 24
+    nwalkers = 20
+    ntemps = 2
 
     orbits = EqualArmlengthOrbits()
     gpu_orbits = EqualArmlengthOrbits(use_gpu=True)
@@ -853,10 +915,11 @@ def get_global_fit_settings(copy_settings_file=False):
     priors_gb_fin = {"gb": ProbDistContainer(priors_gb)}
 
     snrs_ladder = np.array([1., 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0, 35.0, 50.0, 75.0, 125.0, 250.0, 5e2])
-    ntemps_pe = 24  # len(snrs_ladder)
+    ntemps_pe = 2  # len(snrs_ladder)
     # betas =  1 / snrs_ladder ** 2  # make_ladder(ndim * 10, Tmax=5e6, ntemps=ntemps_pe)
     betas = 1 / 1.2 ** np.arange(ntemps_pe)
-    betas[-1] = 0.0001
+    if ntemps_pe > 1:
+        betas[-1] = 0.0001
 
     stopping_kwargs = dict(
         n_iters=1000,
@@ -957,9 +1020,11 @@ def get_global_fit_settings(copy_settings_file=False):
     psd_initialize_kwargs = {}
 
     ### Galactic Foreground Settings #
- 
+    
+    #print('killing the galactic foreground for now')
     priors_galfor = {
         0: uniform_dist(1e-45, 2e-43),  # amp
+        #0: uniform_dist(1e-100, 2e-100),  # amp
         1: uniform_dist(1e-4, 5e-2),  # knee
         2: uniform_dist(0.01, 3.0),  # alpha
         3: uniform_dist(1e0, 1e7),  # Slope1
@@ -1149,20 +1214,23 @@ def get_global_fit_settings(copy_settings_file=False):
     }
 
     # priors
-    priors_emri = {
-        0: uniform_dist(np.log(1e5), np.log(1e6)),  # M total mass
-        1: uniform_dist(1.0, 100.0),  # mu
-        2: uniform_dist(0.01, 0.98),  # a
-        3: uniform_dist(12.0, 16.0),  # p0
-        4: uniform_dist(0.001, 0.4),  # e0
-        5: uniform_dist(0.01, 100.0),  # dist in Gpc
-        6: uniform_dist(-0.99999, 0.99999),  # qS
-        7: uniform_dist(0.0, 2 * np.pi),  # phiS
-        8: uniform_dist(-0.99999, 0.99999),  # qK
-        9: uniform_dist(0.0, 2 * np.pi),  # phiK
-        10: uniform_dist(0.0, 2 * np.pi),  # Phi_phi0
-        11: uniform_dist(0.0, 2 * np.pi),  # Phi_r0
-    }
+    # priors_emri = {
+    #     0: uniform_dist(np.log(5e5), np.log(5e6)),  # M total mass
+    #     1: uniform_dist(1.0, 100.0),  # mu
+    #     2: uniform_dist(0.01, 0.999),  # a
+    #     3: uniform_dist(5.0, 16.0),  # p0
+    #     4: uniform_dist(0.001, 0.8),  # e0
+    #     5: uniform_dist(0.01, 100.0),  # dist in Gpc
+    #     6: uniform_dist(-0.99999, 0.99999),  # qS
+    #     7: uniform_dist(0.0, 2 * np.pi),  # phiS
+    #     8: uniform_dist(-0.99999, 0.99999),  # qK
+    #     9: uniform_dist(0.0, 2 * np.pi),  # phiK
+    #     10: uniform_dist(0.0, 2 * np.pi),  # Phi_phi0
+    #     11: uniform_dist(0.0, 2 * np.pi),  # Phi_r0
+    # }
+
+    delta = 1e-4
+    priors_emri = get_emri_priors(delta=delta)
 
     # transforms from pe to waveform generation
     # after the fill happens (this is a little confusing)
@@ -1207,7 +1275,8 @@ def get_global_fit_settings(copy_settings_file=False):
     
     
     # for EMRI waveform class initialization
-    waveform_kwargs_emri = {}  #  deepcopy(initialize_kwargs_emri)
+    kappa = 1e-1
+    waveform_kwargs_emri = {'mode_selection_threshold':kappa}  #  deepcopy(initialize_kwargs_emri)
 
     get_emri = GetEMRITemplates(
         initialize_kwargs_emri,
@@ -1227,7 +1296,7 @@ def get_global_fit_settings(copy_settings_file=False):
         ndim=12,
         ntemps=ntemps,
         nwalkers=nwalkers,
-        num_prop_repeats=1,
+        num_prop_repeats=5,
         inner_moves=inner_moves_emri,
         progress=False,
         thin_by=1,
@@ -1238,7 +1307,8 @@ def get_global_fit_settings(copy_settings_file=False):
     all_emri_info = dict(
         setup_func=setup_emri_functionality,
         periodic=periodic_emri,
-        priors={"emri": ProbDistContainer(priors_emri)},
+        #priors={"emri": ProbDistContainer(priors_emri)},
+        priors={"emri": priors_emri},
         transform=transform_fn_emri,
         waveform_kwargs=waveform_kwargs_emri,
         initialize_kwargs=initialize_kwargs_emri,
@@ -1253,8 +1323,8 @@ def get_global_fit_settings(copy_settings_file=False):
     # TODO: needs to be okay if there is only one branch
     gf_branch_information = (
         #GFBranchInfo("mbh", 11, 15, 15, branch_state=MBHState, branch_backend=MBHHDFBackend) 
-        GFBranchInfo("gb", 8, 15000, 0, branch_state=GBState, branch_backend=GBHDFBackend) 
-        + GFBranchInfo("emri", 12, 1, 1, branch_state=EMRIState, branch_backend=EMRIHDFBackend)  # TODO: generalize this class?
+        #GFBranchInfo("gb", 8, 15000, 0, branch_state=GBState, branch_backend=GBHDFBackend) 
+        GFBranchInfo("emri", 12, 1, 1, branch_state=EMRIState, branch_backend=EMRIHDFBackend)  # TODO: generalize this class?
         + GFBranchInfo("galfor", 5, 1, 1) 
         + GFBranchInfo("psd", 4, 1, 1)
     )
@@ -1263,7 +1333,7 @@ def get_global_fit_settings(copy_settings_file=False):
         "gf_branch_information": gf_branch_information,
         "source_info":{
             "gb": all_gb_info,
-            # "mbh": all_mbh_info,
+            "mbh": all_mbh_info,
             "psd": all_psd_info,
             "emri": all_emri_info,
         },
