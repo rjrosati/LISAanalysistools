@@ -4,8 +4,10 @@ import shutil
 
 try:
     import cupy as cp
+    gpu_available = True
 except (ModuleNotFoundError, ImportError) as e:
     import numpy as cp
+    gpu_available = True
 
 from eryn.moves.tempering import TemperatureControl, make_ladder
 
@@ -42,7 +44,6 @@ from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.utils.utility import tukey
 
 import few
-few.get_backend('cuda12x')
 
 def dtrend(t, y):
     # @Nikos data setup
@@ -58,11 +59,45 @@ def f_ms_to_s(x):
 
 def mbh_dist_trans(x):
     return x * PC_SI * 1e9  # Gpc
+
+from eryn.utils.updates import Update
+
+from lisatools.globalfit.recipe import Recipe, RecipeStep
+
+class PSDSearchRecipeStep(RecipeStep):
+
+    def setup_run(self, iteration, last_sample, sampler):
+        # making sure
+        self.moves[0].max_logl_mode = True
+        sampler.moves = self.moves
+        sampler.weights = self.weights
+
+    def stopping_function(self, iteration, last_sample, sampler):
+        # this will already be converged to max logl
+        return True
+
+
+class GBSearchStep(RecipeStep):
+    def setup_run(self, iteration, last_sample, sampler):
+        sampler.moves = self.moves
+        sampler.weights = self.weights
+        for move in sampler.moves:
+            move.periodic = sampler.periodic
+            move.ntemps = sampler.ntemps 
+            move.temperature_control = sampler.temperature_control
+
+    def stopping_function(self, iteration, last_sample, sampler):
+        # this will already be converged to max logl
+        return False
     
+
 def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
     gb_info = curr.source_info["gb"]
+    # TODO: adjust this indide current info
+    recipe = curr.current_info["recipe"]
     general_info = curr.general_info
     band_edges = gb_info["band_edges"]
+    band_N_vals = gb_info["band_N_vals"]
     betas = gb_info["pe_info"]["betas"]
     nwalkers = curr.general_info["nwalkers"]
     ntemps = curr.general_info["ntemps"]
@@ -148,7 +183,7 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
     # )
     # ll_source_2 = acs.likelihood(source_only=True)
     # ll_all_2 = acs.likelihood()
-    # breakpoint()
+
     if state.branches["gb"].inds[0].sum() > 0:
         
         coords_out_gb = state.branches["gb"].coords[0,
@@ -184,8 +219,6 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
 
         band_mean_f = (band_edges[1:] + band_edges[:-1]) / 2
         from gbgpu.utils.utility import get_N
-
-        band_N_vals = cp.asarray(get_N(np.full_like(band_mean_f, 1e-30), band_mean_f, waveform_kwargs["T"], waveform_kwargs["oversample"]))
 
         N_vals = band_N_vals[band_inds]
 
@@ -244,8 +277,6 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
     band_mean_f = (band_edges[1:] + band_edges[:-1]) / 2
     from gbgpu.utils.utility import get_N
 
-    band_N_vals = cp.asarray(get_N(np.full_like(band_mean_f, 1e-30), band_mean_f, waveform_kwargs["T"], waveform_kwargs["oversample"]))
-
     if state.branches["gb"].inds.sum() > 0:
         f_in = state.branches["gb"].coords[state.branches["gb"].inds][:, 1] / 1e3
         band_inds_in[state.branches["gb"].inds] = np.searchsorted(band_edges, f_in, side="right") - 1
@@ -269,6 +300,7 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
         phase_maximize=gb_info["pe_info"]["in_model_phase_maximize"],
         ranks_needed=0,
         gpus=[],
+        name="group_prop",
         **gb_info["pe_info"]["group_proposal_kwargs"]
     )
 
@@ -282,16 +314,17 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
         acs,
         np.asarray(fd),
         band_edges,
+        band_N_vals,
         gpu_priors,
     )
 
-    gb_move = GBSpecialStretchMove(
-        *gb_args,
-        **gb_kwargs,
-    )
+    # gb_move = GBSpecialStretchMove(
+    #     *gb_args,
+    #     **gb_kwargs,
+    # )
 
     # add the other
-    gb_move.gb.gpus = gpus
+    # gb_move.gb.gpus = gpus
 
     rj_moves_in = []
     rj_moves_in_frac = []
@@ -324,6 +357,7 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
         acs,
         np.asarray(fd),
         band_edges,
+        band_N_vals,
         gpu_priors,
     )
 
@@ -345,8 +379,9 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
         random_seed=general_info["random_seed"],
         use_gpu=True,
         rj_proposal_distribution=gpu_priors,
+        run_swaps=False, 
         name="rj_fstat_mcmc_search",
-        use_prior_removal=True,  # gb_info["pe_info"]["use_prior_removal"],
+        use_prior_removal=False,  # gb_info["pe_info"]["use_prior_removal"],
         nfriends=nwalkers,
         phase_maximize=True,  # gb_info["pe_info"]["rj_phase_maximize"],
         ranks_needed=ranks_needed_here,
@@ -389,6 +424,7 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
     #     acs,
     #     np.asarray(fd),
     #     band_edges,
+        # band_N_vals,
     #     gpu_priors,
     # )
 
@@ -403,12 +439,32 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
     
     total_frac = sum(rj_moves_in_frac)
 
+    effective_ndim = gf_branch_info.ndims["psd"] + gf_branch_info.ndims["galfor"]
+    temperature_control = TemperatureControl(nwalkers, effective_ndim, ntemps=ntemps, Tmax=np.inf, permute=False)
+    # need permute to be False
+    psd_move = PSDMove(
+        gb, acs, priors, num_repeats=500, max_logl_mode=True,
+        live_dangerously=True, 
+        name="psd move",
+        gibbs_sampling_setup=[{
+            "psd": np.ones((1, gf_branch_info.ndims["psd"]), dtype=bool),
+            "galfor": np.ones((1, gf_branch_info.ndims["galfor"]), dtype=bool)
+        }],
+        temperature_control=temperature_control
+    )
     rj_moves = [(rj_move_i, rj_move_frac_i / total_frac) for rj_move_i, rj_move_frac_i in zip(rj_moves_in, rj_moves_in_frac)]
 
-    moves = GFCombineMove([rj_serial_search_move, gb_move, rj_move_prior])
+    # moves = GFCombineMove([rj_serial_search_move, gb_move, rj_move_prior])
+    moves = GFCombineMove([psd_move, rj_serial_search_move, rj_move_prior, psd_move])
+    moves.accepted = np.zeros((ntemps, nwalkers))
+    
+    tmp = recipe.recipe[1]
+    assert tmp["name"] == "gb search"
+    tmp["adjust"].moves = [moves]
+    
     return SetupInfoTransfer(
         name="gb",
-        in_model_moves=[], #[moves],  # [gb_move] + rj_moves,  # [gb_move] + rj_moves, # probably better to run them all together
+        in_model_moves=[psd_move],  # moves],  # ], #[moves],  # [gb_move] + rj_moves,  # [gb_move] + rj_moves, # probably better to run them all together
         # rj_moves=rj_moves,
     )
 
@@ -469,17 +525,24 @@ def setup_psd_functionality(gf_branch_info, curr, acs, priors, state):
     gb.gpus = gpus
     nwalkers = curr.general_info["nwalkers"]
     ntemps = curr.general_info["ntemps"]
+    recipe = curr.current_info["recipe"]
     
     effective_ndim = gf_branch_info.ndims["psd"] + gf_branch_info.ndims["galfor"]
-    temperature_control = TemperatureControl(nwalkers, effective_ndim, ntemps=ntemps, Tmax=np.inf)
+    temperature_control = TemperatureControl(nwalkers, effective_ndim, ntemps=ntemps, Tmax=np.inf, permute=False)
     psd_move = PSDMove(
-        gb, acs, priors, live_dangerously=True, 
+        gb, acs, priors, num_repeats=500, max_logl_mode=False,
+        live_dangerously=True,
+        name="psd move 2", 
         gibbs_sampling_setup=[{
             "psd": np.ones((1, gf_branch_info.ndims["psd"]), dtype=bool),
             "galfor": np.ones((1, gf_branch_info.ndims["galfor"]), dtype=bool)
         }],
         temperature_control=temperature_control
     )
+    psd_move.accepted = np.zeros((ntemps, nwalkers))
+    tmp = recipe.recipe[0]
+    assert tmp["name"] == "psd search"
+    tmp["adjust"].moves = [psd_move]
 
     return SetupInfoTransfer(
         name="psd",
@@ -632,12 +695,11 @@ def setup_emri_functionality(gf_branch_info, curr, acs, priors, state):
     
     return SetupInfoTransfer(
         name="emri",
-        in_model_moves=[emri_move],
+        in_model_moves=[],  # emri_move],
     )
 
 
 def get_global_fit_settings(copy_settings_file=False):
-
     ###############################
     ###############################
     ###  Global Fit File Setup  ###
@@ -702,6 +764,17 @@ def get_global_fit_settings(copy_settings_file=False):
         tXYZ["Z"].squeeze(),
     )
 
+    dt = t[1] - t[0]
+    _Tobs = YEAR / 12.0
+    Nobs = int(_Tobs / dt)  # len(t)
+    t = t[:Nobs]
+    X = X[:Nobs]
+    Y = Y[:Nobs]
+    Z = Z[:Nobs]
+
+    Tobs = Nobs * dt
+    df = 1 / Tobs
+
     # TODO: @nikos what do you think about the window needed here. For this case at 1 year, I do not think it matters. But for other stuff.
     # the time domain waveforms like emris right now will apply this as well
     tukey_alpha = 0.05
@@ -709,19 +782,6 @@ def get_global_fit_settings(copy_settings_file=False):
     X = dtrend(t, tukey_here * X.copy())
     Y = dtrend(t, tukey_here * Y.copy())
     Z = dtrend(t, tukey_here * Z.copy())
-
-    dt = t[1] - t[0]
-
-    Nobs = len(t)
-    if Nobs > int(YEAR / dt):
-        Nobs = int(YEAR / dt)
-        t = t[:Nobs]
-        X = X[:Nobs]
-        Y = Y[:Nobs]
-        Z = Z[:Nobs]
-
-    Tobs = Nobs * dt
-    df = 1 / Tobs
 
     # f***ing dt
     Xf, Yf, Zf = (np.fft.rfft(X) * dt, np.fft.rfft(Y) * dt, np.fft.rfft(Z) * dt)
@@ -750,6 +810,8 @@ def get_global_fit_settings(copy_settings_file=False):
     data_length = len(A_inj)
     fd = (np.arange(data_length) + start_freq_ind) * df
     
+    # TODO: connect LISA to SSB for MBHs to numerical orbits
+
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
     gpus = [0]
@@ -835,23 +897,59 @@ def get_global_fit_settings(copy_settings_file=False):
     beta_sky_lims = [-np.pi / 2.0 + delta_safe, np.pi / 2.0 - delta_safe]
 
     # band separation setup
-    width_low = 256 + 10
-    width_mid = 512 + 10
-    width_high = 2048 + 10
+    max_start_ind_gb = (f0_lims[0]  / df).astype(int)
+    min_end_ind_gb = (f0_lims[1]  / df).astype(int)
 
-    first_barrier = (0.001 / df).astype(int) * df
-    second_barrier = (0.01 / df).astype(int) * df
-    print("adjust band determination from high freq to low freq due to size of waveform")
-    low_fs_propose = np.arange(f0_lims[0], first_barrier - width_mid * df, width_low * df)
-    mid_fs_propose = np.arange(first_barrier, second_barrier - width_high * df, width_mid * df)
-    high_fs_propose = np.append(
-        np.arange(second_barrier, f0_lims[-1], width_high * df)[:-1], np.array([f0_lims[-1]])
-    )
-    band_edges = np.concatenate([low_fs_propose, mid_fs_propose, high_fs_propose])   
-    band_edges = band_edges[395:]
+    from gbgpu.utils.utility import get_N
+    test_freq_low = 0.0008
+    test_freq_mid = 0.002
+    test_freq_high = 0.012
+
+    if Tobs < YEAR / 2.0:
+        oversample = 2
+    else:
+        oversample = 4
+
+    low_N = get_N(1e-30, test_freq_low, Tobs=Tobs, oversample=oversample)[0]
+    mid_N = get_N(1e-30, test_freq_mid, Tobs=Tobs, oversample=oversample)[0]
+    high_N = get_N(1e-30, test_freq_high, Tobs=Tobs, oversample=oversample)[0]
+    
+    first_barrier = (0.001 / df).astype(int) - mid_N
+    second_barrier = (0.01 / df).astype(int) - high_N
+
+    buffer = 10
+    min_width_low = 2 * low_N + buffer
+    min_width_mid = 2 * mid_N + buffer
+    min_width_high = 2 * high_N + buffer
+
+    # setup low band
+    num_bands_low = ((first_barrier - max_start_ind_gb) // min_width_low) + 1
+    assert first_barrier - num_bands_low * min_width_low > 0
+    _start_ind = first_barrier - num_bands_low * min_width_low
+    low_fs_inds_propose = np.arange(_start_ind, first_barrier, min_width_low)
+    low_Ns = np.full_like(low_fs_inds_propose, low_N, dtype=int)
+
+    # setup mid band
+    num_bands_mid = ((second_barrier - first_barrier) // min_width_mid)
+    mid_fs_inds_propose = np.arange(first_barrier, second_barrier, min_width_mid)
+    second_barrier_final = mid_fs_inds_propose[-1]
+    # remove this last one, it will be added by the upper bands
+    mid_fs_inds_propose = mid_fs_inds_propose[:-1]
+    mid_Ns = np.full_like(mid_fs_inds_propose, mid_N, dtype=int)
+    
+    # setup high band
+    num_bands_high = ((min_end_ind_gb - second_barrier_final) // min_width_high) + 1
+    assert second_barrier_final + num_bands_high * min_width_high < end_freq_ind
+    _end_ind = second_barrier_final + num_bands_high * min_width_high
+    high_fs_inds_propose = np.arange(second_barrier_final, _end_ind + min_width_high, min_width_high)
+    high_Ns = np.full_like(high_fs_inds_propose, high_N, dtype=int)
+    band_edge_inds = np.concatenate([low_fs_inds_propose, mid_fs_inds_propose, high_fs_inds_propose])   
+    band_edges = band_edge_inds * df 
+    band_N_vals = cp.asarray(np.concatenate([low_Ns, mid_Ns, high_Ns]))
+    # band_edges = band_edges[395:]
 
     print("NEED TO THINK ABOUT mCHIRP prior")
-    f0_lims = [band_edges.min(), band_edges.max()]
+    f0_lims = [band_edges[1].min(), band_edges[-2].max()]
 
     fdot_max_val = get_fdot(f0_lims[-1], Mc=m_chirp_lims[-1])
 
@@ -860,7 +958,6 @@ def get_global_fit_settings(copy_settings_file=False):
     num_sub_bands = len(band_edges)
 
     # waveform settings
-    oversample = 4
     # TODO: check beta versus theta
     gb_waveform_kwargs = dict(
         dt=dt, T=Tobs, use_c_implementation=True, oversample=oversample
@@ -872,16 +969,11 @@ def get_global_fit_settings(copy_settings_file=False):
 
     gb_initialize_kwargs = dict(use_gpu=True, gpus=gpus)
 
-    L = 2.5e9
-    # amp_transform = AmplitudeFromSNR(L, Tobs, fd, model="sangria", sens_fn="lisasens")
-
     gb_transform_fn_in = {
         0: np.exp,
         1: f_ms_to_s,
         5: np.arccos,
         8: np.arcsin,
-        # (1, 2, 3): (lambda f0, fdot, fddot: (f0, fdot, 11 / 3.0 * fdot ** 2 / f0)),
-        # (0, 1): amp_transform,  # do not need this when running with amplitude parameter
     }
 
     gb_fill_dict = {"fill_inds": np.array([3]), "ndim_full": 9, "fill_values": np.array([0.0])}
@@ -947,7 +1039,7 @@ def get_global_fit_settings(copy_settings_file=False):
             n_iter_update=1,
             live_dangerously=True,
             a=1.75,
-            num_repeat_proposals=100
+            num_repeat_proposals=200
         ),
         other_tempering_kwargs=dict(
             adaptation_time=2,
@@ -990,6 +1082,7 @@ def get_global_fit_settings(copy_settings_file=False):
     all_gb_info = dict(
         setup_func=setup_gb_functionality,
         band_edges=band_edges,
+        band_N_vals=band_N_vals,
         periodic=gb_periodic,
         priors=priors_gb_fin,
         transform=gb_transform_fn,
@@ -1108,7 +1201,7 @@ def get_global_fit_settings(copy_settings_file=False):
 
     # sampler treats periodic variables by wrapping them properly
     periodic_mbh = {
-        "mbh": {5: 2 * np.pi, 7: np.pi, 8: np.pi}
+        "mbh": {5: 2 * np.pi, 7: 2 * np.pi, 9: np.pi}
     }
 
     # waveform kwargs
@@ -1329,17 +1422,22 @@ def get_global_fit_settings(copy_settings_file=False):
         + GFBranchInfo("psd", 4, 1, 1)
     )
 
+    recipe = Recipe()
+    recipe.add_recipe_component(PSDSearchRecipeStep(), name="psd search")
+    recipe.add_recipe_component(GBSearchStep(), name="gb search")
+    
     return {
         "gf_branch_information": gf_branch_information,
         "source_info":{
             "gb": all_gb_info,
             "mbh": all_mbh_info,
             "psd": all_psd_info,
-            "emri": all_emri_info,
+            # "emri": all_emri_info,
         },
         "general": all_general_info,
         "rank_info": rank_info,
         "gpu_assignments": gpu_assignments,
+        "recipe": recipe,
     }
 
 

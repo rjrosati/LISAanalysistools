@@ -109,9 +109,11 @@ class CurrentInfoGlobalFit:
             gb_search_proposal_gmm_info = None
             gb_refit_proposal_gmm_info = None
 
-        self.source_info["gb"]["search_gmm_info"] = gb_search_proposal_gmm_info
-        self.source_info["gb"]["refit_gmm_info"] = gb_refit_proposal_gmm_info
-    
+        # TODO: remove this?
+        if "gb" in self.source_info:
+            self.source_info["gb"]["search_gmm_info"] = gb_search_proposal_gmm_info
+            self.source_info["gb"]["refit_gmm_info"] = gb_refit_proposal_gmm_info
+
     def initialize_mbh_state_from_search(self, mbh_output_point_info):
         output_points_pruned = np.asarray(mbh_output_point_info["output_points_pruned"]).transpose(1, 0, 2)
         coords = np.zeros((self.source_info["gb"]["pe_info"]["ntemps"], self.source_info["gb"]["pe_info"]["nwalkers"], output_points_pruned.shape[1], self.source_info["mbh"]["pe_info"]["ndim"]))
@@ -188,6 +190,7 @@ class GlobalFit:
         self.gf_branch_information = gf_branch_information
         self.comm = comm
         self.curr = curr
+        self.recipe = curr.current_info["recipe"]
         self.rank = comm.Get_rank()
         self.nwalkers = self.curr.general_info["nwalkers"]
         self.ntemps = self.curr.general_info["ntemps"]
@@ -213,7 +216,7 @@ class GlobalFit:
         name = "GlobalFit"
         self.logger = init_logger(filename="global_fit.log", level=level, name=name)
 
-    def load_info(self):
+    def load_info(self, priors):
         self.logger.debug("need to adjust file path")
         # TODO: update to generalize
         if os.path.exists("emri_noise_galfor_tight.h5"):
@@ -260,9 +263,19 @@ class GlobalFit:
             #     breakpoint()
             if 'emri' in state.sub_states.keys():
                 state.sub_states["emri"].betas_all = np.zeros((self.gf_branch_information.nleaves_max["emri"], self.ntemps))
+            # start from priors by default
+            coords = {key: priors[key].rvs(size=(self.ntemps, self.nwalkers, self.gf_branch_information.nleaves_max[key])) for key in self.gf_branch_information.branch_names}
+            inds = {key: np.zeros((self.ntemps, self.nwalkers, self.gf_branch_information.nleaves_max[key]), dtype=bool) for key in self.gf_branch_information.branch_names}
+            # TODO: make this more generic to anything
+            inds["psd"][:] = True
+            inds["galfor"][:] = True
+            state = GFState(coords, inds=inds, random_state=np.random.get_state(), sub_state_bases=self.gf_branch_information.branch_state)
+            
+            band_temps = np.zeros((len(self.curr.source_info["gb"]["band_edges"]) - 1, self.ntemps))
+            state.sub_states["gb"].initialize_band_information(self.nwalkers, self.ntemps, self.curr.source_info["gb"]["band_edges"], band_temps)
             state.log_like = np.zeros((self.ntemps, self.nwalkers))
             state.log_prior = np.zeros((self.ntemps, self.nwalkers))
-            self.logger.debug("pickle state load success")
+            # self.logger.debug("pickle state load success")
         return state
 
     def setup_acs(self, state):
@@ -295,7 +308,7 @@ class GlobalFit:
                 continue
 
             print("want to remove this emri thing eventually")
-            if name == "psd" or name == "emri":
+            if True:  # name == "psd" or name == "emri":
                 continue
 
             templates_tmp = cp.asarray(source_info["get_templates"](state, source_info, self.curr.general_info))
@@ -328,8 +341,21 @@ class GlobalFit:
             nleaves_min = self.gf_branch_information.nleaves_min
             nwalkers = general_info["nwalkers"]
             ntemps = general_info["ntemps"]
+
+            priors = {}
+            periodic = {}
+            for name in branch_names:
+                if name not in self.curr.source_info:
+                    continue
+                for key, value in self.curr.source_info[name]["priors"].items():
+                    priors[key] = value
+                
+                if "periodic" in self.curr.source_info[name] and self.curr.source_info[name]["periodic"] is not None:
+                    for key, value in self.curr.source_info[name]["periodic"].items():
+                        periodic[key] = value
+                # breakpoint()
            
-            state = self.load_info()
+            state = self.load_info(priors)
             self.logger.debug("state loaded")
 
             supps_base_shape = (ntemps, nwalkers)
@@ -400,19 +426,6 @@ class GlobalFit:
 
             state.log_like[:] = acs.likelihood()
 
-            priors = {}
-            periodic = {}
-            for name in branch_names:
-                if name not in self.curr.source_info:
-                    continue
-                for key, value in self.curr.source_info[name]["priors"].items():
-                    priors[key] = value
-                
-                if "periodic" in self.curr.source_info[name] and self.curr.source_info[name]["periodic"] is not None:
-                    for key, value in self.curr.source_info[name]["periodic"].items():
-                        periodic[key] = value
-                # breakpoint()
-            
             like_mix = BasicResidualacsLikelihood(acs)
 
             backend = GFHDFBackend(
@@ -426,6 +439,7 @@ class GlobalFit:
             )
 
             extra_reset_kwargs = {}
+            # TODO: fix this somehow
             for name in branch_names:
                 if name in state.sub_states and state.sub_states[name] is not None:
                     extra_reset_kwargs = {**extra_reset_kwargs, **state.sub_states[name].reset_kwargs}
@@ -504,6 +518,9 @@ class GlobalFit:
             for rank, tmp in rank_instructions.items():
                 self.comm.send({"rank": rank, **tmp}, dest=rank)
             
+            self.recipe.backend = backend
+            backend.add_recipe(self.recipe)
+
             # permute False is there for the PSD sampling for now
             sampler_mix = GlobalFitEngine(
                 acs,
@@ -522,21 +539,19 @@ class GlobalFit:
                 vectorize=True,
                 periodic=periodic,
                 branch_names=branch_names,
-                # update_fn=update,  # stop_converge_mix,
-                # update_iterations=gb_info["pe_info"]["update_iterations"],
+                # update_fn=recipe,  # stop_converge_mix,
+                # update_iterations=1,  # TODO: change this?
                 provide_groups=True,
                 provide_supplemental=True,
                 track_moves=False,
-                # stopping_fn=stopping_fn,
-                # stopping_iterations=stopping_iterations,
+                stopping_fn=self.recipe,
+                stopping_iterations=1,
             )
 
-            state.log_prior = sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
             state.log_like[:] = acs.likelihood(sum_instead_of_trapz=False)[None, :]
-
-            #breakpoint()
-
-            sampler_mix.run_mcmc(state, 10000, thin_by=1, progress=True, store=True)
+            state.log_prior = np.zeros_like(state.log_like)  # sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
+            self.recipe.setup_first_recipe_step(sampler_mix.iteration, state, sampler_mix)
+            sampler_mix.run_mcmc(state, 100, thin_by=1, progress=True, store=True)
             self.comm.send({"finish_run": True}, dest=self.results_rank)
 
         elif self.rank == self.results_rank:
