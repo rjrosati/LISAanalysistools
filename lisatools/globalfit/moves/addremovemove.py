@@ -96,9 +96,13 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         xp.get_default_memory_pool().free_all_blocks()
         waveforms = xp.zeros((coords.shape[0], self.acs.nchannels, self.acs.data_length), dtype=complex)
         
-        for i in range(coords.shape[0]):
-            waveforms[i] = self.waveform_gen(*coords[i], **self.waveform_gen_kwargs)
+        #logp = self.priors[self.branch_name].logpdf(coords)
+        #indeces_good = np.where(~np.isinf(logp))[0] 
         
+        for i in range(coords.shape[0]):
+        #for i in indeces_good:
+            waveforms[i] = self.waveform_gen(*coords[i], **self.waveform_gen_kwargs)
+
         return waveforms
 
     def setup_likelihood_here(self, coords):
@@ -115,9 +119,6 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         return ll
 
     def propose(self, model, state):
-        print("PROPOSING")
-        print("------" * 20)
-        tic = time.time()   
 
         new_state = deepcopy(state)
 
@@ -133,7 +134,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         for base_leaf in range(self.nleaves_max):
             # second step of randomizing order (making sure it does not run over)
             leaf = (base_leaf + start_leaf) % self.nleaves_max
-            print(f"Processing leaf {leaf}")
+            # print(f"Processing leaf {leaf}")
 
             # fill this temperature control with temperatures from current state
             temperature_control_here = self.temperature_controls[leaf]
@@ -162,7 +163,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 data_index=data_index_in,
             ).reshape((self.ntemps, self.nwalkers)).real
             
-            print(f"prev_logl: {prev_logl}. elapsed: {time.time() - tic}")
+            #print(f"prev_logl: {prev_logl}. elapsed: {time.time() - tic}")
 
             prev_logp = self.priors[self.branch_name].logpdf(old_coords).reshape((self.ntemps, self.nwalkers))
 
@@ -238,7 +239,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                         #constants_index=data_index,
                     )
 
-                    print(f"new logl: {logl}. elapsed: {time.time() - tic}")
+                    #print(f"new logl: {logl}. elapsed: {time.time() - tic}")
 
                     logl = logl.reshape(self.ntemps, nwalkers_here)
                     
@@ -307,9 +308,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # udpate at the end
         # new_state.log_like[(temp_inds_update, walker_inds_update)] = logl.flatten()
         # new_state.log_prior[(temp_inds_update, walker_inds_update)] = logp.flatten()
-        print("before computing current likelihood. elapsed: ", time.time() - tic)
+        # print("before computing current likelihood. elapsed: ", time.time() - tic)
         current_ll = self.acs.likelihood()  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
-        print("after computing current likelihood. elapsed: ", time.time() - tic)
+        # print("after computing current likelihood. elapsed: ", time.time() - tic)
         xp.get_default_memory_pool().free_all_blocks()
         # TODO: add check with last used logl
 

@@ -128,10 +128,15 @@ class PSDMove(GlobalFitMove, StretchMove):
 
         # ensuring it is up to date. Should not change anything.
         eryn_state_in = eryn_State(state.branches_coords, inds=state.branches_inds, supplemental=state.supplemental, branch_supplemental=state.branches_supplemental, betas=state.betas, log_like=state.log_like, log_prior=state.log_prior, copy=True)
+        
         before_vals = model.analysis_container_arr.likelihood(sum_instead_of_trapz=True).copy()
+        #print('changed to sum_instead_of_trapz=False')
+        #before_vals = model.analysis_container_arr.likelihood(sum_instead_of_trapz=False).copy()
         
         if np.any(np.abs(before_vals - state.log_like[0]) > 1e-4) :
-            breakpoint()
+            #breakpoint()
+            print("WARNING: Likelihood values do not match between model and state.")
+            # this is because here sum_instead_of_trapz=True while in other places it is False
 
         # breakpoint()
         # logp = model.compute_log_prior_fn(state.branches_coords, inds=state.branches_inds, supps=state.supplemental)
@@ -156,8 +161,10 @@ class PSDMove(GlobalFitMove, StretchMove):
         # CHECK THIS STATE SETUP
         new_state = GFState(
             tmp_state,
-            copy=True
+            copy=True,
+            sub_state_bases=state.sub_state_bases,
         )
+        
         new_state.sub_states = state.sub_states
         new_state.sub_state_bases = state.sub_state_bases
 
