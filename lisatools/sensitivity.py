@@ -421,6 +421,237 @@ class T1TDISens(Sensitivity):
         t = 4.0 * x**2 * np.sin(x) ** 2
         return 0.0 * (Sh * t)
 
+class Alpha2TDISens(Sensitivity):
+    channel: str = "alpha"
+
+    @staticmethod
+    def transform(
+        f: float | np.ndarray,
+        Spm: float | np.ndarray,
+        Sop: float | np.ndarray,
+        **kwargs: dict,
+    ) -> float | np.ndarray:
+        """
+        Transform from base noise (Sop, Spm) to the TDI alpha noise PSD.
+        """
+        x = 2.0 * np.pi * lisaLT * f  # dimensionless frequency
+        Sa = (
+            Spm * (-16*np.cos(4*x/2) - 40*np.cos(8*x/2) + 16*np.cos(12*x/2) + 2*np.cos(16*x/2) + 38) + 
+            Sop * (12 - 12*np.cos(6*x/2))
+            )
+        return Sa
+
+class Alpha1TDISens(Sensitivity):
+    channel: str = "alpha"
+
+    @staticmethod
+    def transform(
+        f: float | np.ndarray,
+        Spm: float | np.ndarray,
+        Sop: float | np.ndarray,
+        **kwargs: dict,
+    ) -> float | np.ndarray:
+        """
+        Transform from base noise (Sop, Spm) to the TDI alpha noise PSD.
+        """
+        x = 2.0 * np.pi * lisaLT * f  # dimensionless frequency
+        Sa = (
+            Spm * (4*(7 + 4*np.cos(x) + 2*np.cos(2*x))*np.sin(x/2)**2) + 
+            Sop * (6)
+            )
+        return Sa
+class Beta1TDISens(Sensitivity):
+    channel: str = "beta"
+
+    @staticmethod
+    def transform(
+        f: float | np.ndarray,
+        Spm: float | np.ndarray,
+        Sop: float | np.ndarray,
+        **kwargs: dict,
+    ) -> float | np.ndarray:
+        """
+        Transform from base noise (Sop, Spm) to the TDI alpha noise PSD.
+        """
+        x = 2.0 * np.pi * lisaLT * f  # dimensionless frequency
+        Sa = (
+            Spm * (4*(7 + 4*np.cos(x) + 2*np.cos(2*x))*np.sin(x/2)**2) + 
+            Sop * (6)
+            )
+        return Sa
+class Gamma1TDISens(Sensitivity):
+    channel: str = "gamma"
+
+    @staticmethod
+    def transform(
+        f: float | np.ndarray,
+        Spm: float | np.ndarray,
+        Sop: float | np.ndarray,
+        **kwargs: dict,
+    ) -> float | np.ndarray:
+        """
+        Transform from base noise (Sop, Spm) to the TDI alpha noise PSD.
+        """
+        x = 2.0 * np.pi * lisaLT * f  # dimensionless frequency
+        Sa = (
+            Spm * (4*(7 + 4*np.cos(x) + 2*np.cos(2*x))*np.sin(x/2)**2) + 
+            Sop * (6)
+            )
+        return Sa
+class AlphaBeta1TDISens(Sensitivity):
+    channel: str = "alpha beta"
+
+    @staticmethod
+    def transform(
+        f: float | np.ndarray,
+        Spm: float | np.ndarray,
+        Sop: float | np.ndarray,
+        **kwargs: dict,
+    ) -> float | np.ndarray:
+        """
+        Transform from base noise (Sop, Spm) to the TDI alpha-beta noise CSD.
+        """
+        x = 2.0 * np.pi * lisaLT * f  # dimensionless frequency
+        Sa = (
+            Spm * (4*(-1 + 2*np.cos(x))*np.sin(x/2)**2) + 
+            Sop * (4*np.cos(x) + 2*np.cos(2*x))
+            )
+        return Sa
+class AlphaGamma1TDISens(Sensitivity):
+    channel: str = "alpha gamma"
+
+    @staticmethod
+    def transform(
+        f: float | np.ndarray,
+        Spm: float | np.ndarray,
+        Sop: float | np.ndarray,
+        **kwargs: dict,
+    ) -> float | np.ndarray:
+        """
+        Transform from base noise (Sop, Spm) to the TDI alpha-gamma noise CSD.
+        """
+        x = 2.0 * np.pi * lisaLT * f  # dimensionless frequency
+        Sa = (
+            Spm * (4*(-1 + 2*np.cos(x))*np.sin(x/2)**2) + 
+            Sop * (4*np.cos(x) + 2*np.cos(2*x))
+            )
+        return Sa
+class BetaAlpha1TDISens(Sensitivity):
+    channel: str = "beta alpha"
+
+    @staticmethod
+    def transform(
+        f: float | np.ndarray,
+        Spm: float | np.ndarray,
+        Sop: float | np.ndarray,
+        **kwargs: dict,
+    ) -> float | np.ndarray:
+        """
+        Transform from base noise (Sop, Spm) to the TDI alpha-gamma noise CSD.
+        """
+        x = 2.0 * np.pi * lisaLT * f  # dimensionless frequency
+        Sa = (
+            Spm * (4*(-1 + 2*np.cos(x))*np.sin(x/2)**2) + 
+            Sop * (4*np.cos(x) + 2*np.cos(2*x))
+            )
+        return Sa
+class BetaGamma1TDISens(Sensitivity):
+    channel: str = "beta gamma"
+
+    @staticmethod
+    def transform(
+        f: float | np.ndarray,
+        Spm: float | np.ndarray,
+        Sop: float | np.ndarray,
+        **kwargs: dict,
+    ) -> float | np.ndarray:
+        """
+        Transform from base noise (Sop, Spm) to the TDI alpha-gamma noise CSD.
+        """
+        x = 2.0 * np.pi * lisaLT * f  # dimensionless frequency
+        Sa = (
+            Spm * (4*(-1 + 2*np.cos(x))*np.sin(x/2)**2) + 
+            Sop * (4*np.cos(x) + 2*np.cos(2*x))
+            )
+        return Sa
+class GammaAlpha1TDISens(Sensitivity):
+    channel: str = "gamma alpha"
+
+    @staticmethod
+    def transform(
+        f: float | np.ndarray,
+        Spm: float | np.ndarray,
+        Sop: float | np.ndarray,
+        **kwargs: dict,
+    ) -> float | np.ndarray:
+        """
+        Transform from base noise (Sop, Spm) to the TDI alpha-gamma noise CSD.
+        """
+        x = 2.0 * np.pi * lisaLT * f  # dimensionless frequency
+        Sa = (
+            Spm * (4*(-1 + 2*np.cos(x))*np.sin(x/2)**2) + 
+            Sop * (4*np.cos(x) + 2*np.cos(2*x))
+            )
+        return Sa
+class GammaBeta1TDISens(Sensitivity):
+    channel: str = "gamma beta"
+
+    @staticmethod
+    def transform(
+        f: float | np.ndarray,
+        Spm: float | np.ndarray,
+        Sop: float | np.ndarray,
+        **kwargs: dict,
+    ) -> float | np.ndarray:
+        """
+        Transform from base noise (Sop, Spm) to the TDI alpha-gamma noise CSD.
+        """
+        x = 2.0 * np.pi * lisaLT * f  # dimensionless frequency
+        Sa = (
+            Spm * (4*(-1 + 2*np.cos(x))*np.sin(x/2)**2) + 
+            Sop * (4*np.cos(x) + 2*np.cos(2*x))
+            )
+        return Sa
+
+class Beta2TDISens(Sensitivity):
+    channel: str = "beta"
+
+    @staticmethod
+    def transform(
+        f: float | np.ndarray,
+        Spm: float | np.ndarray,
+        Sop: float | np.ndarray,
+        **kwargs: dict,
+    ) -> float | np.ndarray:
+        """
+        Transform from base noise (Sop, Spm) to the TDI beta noise PSD.
+        """
+        x = 2.0 * np.pi * lisaLT * f  # dimensionless frequency
+        Sa = (
+            Spm * (-16*np.cos(4*x/2) - 40*np.cos(8*x/2) + 16*np.cos(12*x/2) + 2*np.cos(16*x/2) + 38) + 
+            Sop * (12 - 12*np.cos(6*x/2))
+            )
+        return Sa
+
+class Gamma2TDISens(Sensitivity):
+    channel: str = "gamma"
+
+    @staticmethod
+    def transform(
+        f: float | np.ndarray,
+        Spm: float | np.ndarray,
+        Sop: float | np.ndarray,
+        **kwargs: dict,
+    ) -> float | np.ndarray:
+        """
+        Transform from base noise (Sop, Spm) to the TDI gamma noise PSD.
+        """
+        x = 2.0 * np.pi * lisaLT * f  # dimensionless frequency
+        Sa = (
+            Spm * (-16*np.cos(4*x/2) - 40*np.cos(8*x/2) + 16*np.cos(12*x/2) + 2*np.cos(16*x/2) + 38) + 
+            Sop * (12 - 12*np.cos(6*x/2))
+            )
+        return Sa
 
 class LISASens(Sensitivity):
     @classmethod
@@ -817,6 +1048,34 @@ class AE1SensitivityMatrix(SensitivityMatrix):
         sens_mat = [A1TDISens, E1TDISens]
         super().__init__(f, sens_mat, **sens_kwargs)
 
+class SagnacSensitivityMatrix(SensitivityMatrix):
+    """Sensitivity matrix for TDI Sagnac observables (α, β, γ).
+
+    Args:
+        f: Frequency array.
+        **sens_kwargs: Keyword arguments passed to individual channel sensitivity classes.
+    """
+
+    def __init__(self, f: np.ndarray, **sens_kwargs: dict) -> None:
+        sens_mat = [Alpha2TDISens, Beta2TDISens, Gamma2TDISens]
+        super().__init__(f, sens_mat, **sens_kwargs)
+
+class Sagnac1SensitivityMatrix(SensitivityMatrix):
+    """Sensitivity matrix for TDI Sagnac observables (α, β, γ).
+
+    Args:
+        f: Frequency array.
+        **sens_kwargs: Keyword arguments passed to individual channel sensitivity classes.
+    """
+
+    def __init__(self, f: np.ndarray, **sens_kwargs: dict) -> None:
+        sens_mat = [
+            [Alpha1TDISens, AlphaBeta1TDISens, AlphaGamma1TDISens],
+            [BetaAlpha1TDISens, Beta1TDISens, BetaGamma1TDISens],
+            [GammaAlpha1TDISens, GammaBeta1TDISens, Gamma1TDISens],
+        ]
+        super().__init__(f, sens_mat, **sens_kwargs)
+
 
 class LISASensSensitivityMatrix(SensitivityMatrix):
     """Default sensitivity matrix adding :class:`LISASens` for the specified number of channels.
@@ -904,6 +1163,16 @@ __stock_sens_options__ = [
     "Y2TDISens",
     "Z2TDISens",
     "LISASens",
+    "Alpha1TDISens",
+    "Beta1TDISens",
+    "Gamma1TDISens",
+    "BetaAlpha1TDISens",
+    "BetaGamma1TDISens",
+    "GammaAlpha1TDISens",
+    "GammaBeta1TDISens",
+    "Alpha2TDISens",
+    "Beta2TDISens",
+    "Gamma2TDISens",
     "CornishLISASens",
     "FlatPSDFunction",
 ]
@@ -923,6 +1192,7 @@ __stock_sensitivity_mat_options__ = [
     "XYZ1SensitivityMatrix",
     "AET1SensitivityMatrix",
     "AE1SensitivityMatrix",
+    "Sagnac1SensitivityMatrix",
 ]
 
 
