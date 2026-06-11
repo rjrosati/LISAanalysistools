@@ -83,6 +83,20 @@ class DomainSettingsBase(LISAToolsParallelModule):
         """Return a new settings object describing a sliced view of this domain."""
         raise NotImplementedError("get_slice needs to be implemented for this signal type.")
 
+    @property
+    def logdet_factor(self) -> float:
+        """Factor multiplying ``sum(log det C)`` in the Gaussian noise likelihood term.
+
+        ``1.0`` is the one-sided complex (Whittle / FD) convention used
+        historically throughout lisatools: ``logL_n = -sum(log det C)``.
+        Domains whose basis coefficients are *real* Gaussian variables (TD,
+        real WDM) override this with ``0.5``, since each real coefficient
+        contributes ``-0.5 log det C`` to the Gaussian density. Without the
+        ``0.5`` the noise-parameter posterior peaks at ``C_true / 2``
+        (validated empirically via a global covariance-scale scan).
+        """
+        return 1.0
+
 
 class DomainBase:
     """Base wrapper for an array tagged with its domain settings.
@@ -591,6 +605,11 @@ class TDSettings(DomainSettingsBase):
     def differential_component(self) -> float:
         """Differential element used in inner-product summations (``dt`` in TD)."""
         return self.dt
+
+    @property
+    def logdet_factor(self) -> float:
+        """Real Gaussian convention: each TD sample contributes ``-0.5 log det C``."""
+        return 0.5
 
     @property
     def total_terms(self) -> int:
@@ -1749,14 +1768,12 @@ class WDMSettings(DomainSettingsBase):
         self.t0 = t0
         # Complex/quadrature WDM mode -- when True the wavelet basis carries
         # both the standard real coefficient and its quadrature (Hilbert-pair)
-        # companion as the imaginary part of a complex coefficient. The
-        # differential_component is halved (0.125 instead of 0.25) so that the
-        # diagnostic inner_product (which sums Re*Re + Im*Im via np.real of
-        # sig1.conj()*sig2) recovers the same time-domain power as the
-        # real-only WDM. NB: at the folded boundary layer m=0 (which packs
-        # DC and Nyquist) the imag part is set to zero, so the correction is
-        # exact for narrowband signals away from DC/Nyquist and slightly
-        # over-corrects when boundary layers carry non-trivial power.
+        # companion as the imaginary part of a complex coefficient. This is a
+        # plotting/diagnostic convenience: the quadrature companion is
+        # degenerate with the real part, so the likelihood machinery
+        # (diagnostic.inner_product) discards the imaginary part and computes
+        # the same value as the real-only WDM basis. differential_component
+        # and logdet_factor are therefore identical to the real case.
         self.is_complex = bool(is_complex)
 
         # these have to come after layer_df b/c setters
@@ -2182,10 +2199,19 @@ class WDMSettings(DomainSettingsBase):
     def differential_component(self) -> float:
         # Real-only WDM is a tight frame; inner_product uses
         # 4 * sum(...) * differential_component. The complex/quadrature WDM
-        # sums Re*Re + Im*Im, which is approximately 2x the real-only power
-        # (the Hilbert companion has matching variance), so halve the
-        # differential to keep the inner-product value invariant.
-        return 0.125 if getattr(self, "is_complex", False) else 0.25
+        # variant is plotting-only and degenerate between Re and Im, so the
+        # likelihood path uses only the real part of the coefficients
+        # (see diagnostic.inner_product) and the same differential applies.
+        return 0.25
+
+    @property
+    def logdet_factor(self) -> float:
+        # WDM coefficients entering the likelihood are real Gaussian
+        # variables: each pixel contributes -0.5 log det C. This holds for
+        # the quadrature (is_complex) variant too, since its imaginary part
+        # is dropped before the likelihood is formed. See
+        # DomainSettingsBase.logdet_factor.
+        return 0.5
 
     @property
     def total_terms(self) -> int:

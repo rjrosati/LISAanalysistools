@@ -3191,6 +3191,16 @@ class CompositeSensitivityBackend:
         galfor_stochastic_fn: Stochastic-model class used for the optional
             :class:`GalacticForeground` component (only used when the caller
             supplies ``galfor_params``).
+        galfor_modulation: Per-element time modulation forwarded to the
+            :class:`GalacticForeground` component: ``None`` (stationary
+            isotropic limit), a ``(nch, nch)`` constant matrix, a
+            ``(nch, nch, Ntime)`` array, or a callable
+            ``t_arr -> (nch, nch, Ntime)`` (evaluated lazily on the domain's
+            active time grid — the recommended form when the domain settings
+            are resolved by a factory).
+        sgwb_stochastic_fn: SGWB spectral-template class or stock name used
+            for the optional :class:`SGWB` component (only used when the
+            caller supplies ``sgwb_params``).
         extra_components: Additional :class:`NoiseComponent` instances added
             to every constructed matrix — e.g. a stationary SGWB. These are
             held by reference so they're built once and reused.
@@ -3204,6 +3214,8 @@ class CompositeSensitivityBackend:
         model_name: str = "sangria",
         instrument_fill_nans: float = 0.0,
         galfor_stochastic_fn=HyperbolicTangentGalacticForeground,
+        galfor_modulation: Optional[object] = None,
+        sgwb_stochastic_fn="PowerLawSGWB",
         extra_components: Optional[Sequence[NoiseComponent]] = None,
     ):
         self.basis_settings = settings
@@ -3211,6 +3223,8 @@ class CompositeSensitivityBackend:
         self.model_name = model_name
         self.instrument_fill_nans = instrument_fill_nans
         self.galfor_stochastic_fn = galfor_stochastic_fn
+        self.galfor_modulation = galfor_modulation
+        self.sgwb_stochastic_fn = sgwb_stochastic_fn
         self.extra_components = list(extra_components) if extra_components else []
         # ``LISAModel.lisanoises`` only reads Soms_d / Sa_a — the orbits field
         # is just a carrier here, so one shared instance is fine.
@@ -3221,6 +3235,7 @@ class CompositeSensitivityBackend:
         name: str,
         psd_params,
         galfor_params=None,
+        sgwb_params=None,
         transform_fn: Optional[TransformContainer] = None,
     ) -> CompositeSensitivityMatrix:
         """Build a per-walker :class:`CompositeSensitivityMatrix`.
@@ -3230,7 +3245,11 @@ class CompositeSensitivityBackend:
             psd_params: ``[Soms_d, Sa_a]`` in linear (square-root) units, matching
                 the convention used by :class:`XYZSensitivityBackend`.
             galfor_params: Optional galactic-foreground parameters. When given,
-                a :class:`GalacticForeground` component is added.
+                a :class:`GalacticForeground` component is added (with the
+                backend's ``galfor_modulation``).
+            sgwb_params: Optional SGWB spectral-template parameters (e.g.
+                ``(log10_A, alpha)`` for :class:`~lisatools.stochastic.PowerLawSGWB`).
+                When given, an :class:`SGWB` component is added.
             transform_fn: Optional :class:`TransformContainer`. Applied to
                 ``psd_params`` first if provided.
 
@@ -3259,8 +3278,17 @@ class CompositeSensitivityBackend:
             components.append(
                 GalacticForeground(
                     foreground_params=np.asarray(galfor_params, dtype=float),
+                    modulation=self.galfor_modulation,
                     tdi_generation=self.tdi_generation,
                     stochastic_fn=self.galfor_stochastic_fn,
+                )
+            )
+        if sgwb_params is not None:
+            components.append(
+                SGWB(
+                    sgwb_params=np.asarray(sgwb_params, dtype=float),
+                    stochastic_fn=self.sgwb_stochastic_fn,
+                    tdi_generation=self.tdi_generation,
                 )
             )
         components.extend(self.extra_components)

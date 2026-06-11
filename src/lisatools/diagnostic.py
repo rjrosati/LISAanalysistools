@@ -160,6 +160,12 @@ def inner_product(
     else:
         func = xp.real
 
+    # Complex/quadrature WDM is a plotting convenience; its imaginary
+    # (Hilbert-companion) part is degenerate with the real part. The
+    # likelihood is defined on the real coefficients only, so drop the
+    # imaginary part here to match the real-valued WDM inner product.
+    drop_imag = bool(getattr(basis, "is_complex", False))
+
     # initialize
     out = 0.0
     # x = freqs
@@ -170,6 +176,9 @@ def inner_product(
         factor = op_set["factor"]
         temp1 = sig1[op_set["sig1_ind"]]
         temp2 = sig2[op_set["sig2_ind"]]
+        if drop_imag:
+            temp1 = xp.real(temp1)
+            temp2 = xp.real(temp2)
         inv_psd_tmp = psd.invC[op_set["psd_ind"]]
 
         if hasattr(sig1.data_res_arr, "apply_frequency_layer_mask") or hasattr(sig2.data_res_arr, "apply_frequency_layer_mask"):
@@ -313,7 +322,15 @@ def noise_likelihood_term(psd: SensitivityMatrixBase) -> float:
 
     .. math::
 
-        \\log{\\mathcal{L}}_n = -\\sum \\log{\\vec{S}_n}.
+        \\log{\\mathcal{L}}_n = -\\kappa \\sum \\log{\\vec{S}_n},
+
+    where :math:`\\kappa` is the domain's
+    :attr:`~lisatools.domains.DomainSettingsBase.logdet_factor`: ``1.0`` in
+    the one-sided complex (FD / Whittle) convention, ``0.5`` for real-basis
+    domains (TD, WDM — including the complex/quadrature WDM variant, whose
+    likelihood uses only the real part of the coefficients) where each real
+    coefficient contributes :math:`-\\frac{1}{2}\\log{\\det{C}}` to the
+    Gaussian density.
 
     Args:
         psd: Sensitivity information.
@@ -332,7 +349,8 @@ def noise_likelihood_term(psd: SensitivityMatrixBase) -> float:
     detC = psd.detC
     keep = (detC != 0.0) & (~np.isinf(detC)) & (~np.isnan(detC))
 
-    nl_val = -np.sum(np.log(np.abs(detC[keep])))
+    factor = getattr(psd.basis_settings, "logdet_factor", 1.0)
+    nl_val = -factor * np.sum(np.log(np.abs(detC[keep])))
     return nl_val
 
 

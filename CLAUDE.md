@@ -191,6 +191,81 @@ with JAX-native idioms → cross-backend inner-product validation.
 
 
 
+## PSD and transform conventions (FD / TD / WDM)
+
+All numerically verified against white noise with known one-sided PSD
+`S0 = 2 * sigma**2 * dt` (FD periodogram, `E[w_mn**2]`, and FD-vs-WDM
+inner products all agree to sampling error).
+
+### Frequency domain — "physical" FFT + one-sided Whittle
+
+- **FFT convention**: `TDSignal.fft` computes `x̃(f) = dt * np.fft.rfft(x)`
+  (the continuum / "physical" convention; units `[x]/Hz`). The inverse
+  (`FDSignal.ifft`) divides by `dt` correspondingly.
+- **PSD convention**: one-sided. `E[|x̃(f)|²] = (Tobs / 2) * S(f)`, i.e.
+  the periodogram estimator is `Ŝ(f) = (2 / Tobs) * |x̃(f)|²`
+  `= (2 dt² / Tobs) * |np.fft.rfft(x)|²`. So yes — we use the standard
+  physical-FFT/one-sided-Whittle pairing.
+- **Inner product** (`diagnostic.inner_product`): uniformly across domains
+  `<a|b> = 4 * Re Σ (ã* b̃ / S) * differential_component`, with
+  `differential_component = df` in FD, `dt` in TD, `0.25` in WDM.
+- **Noise likelihood**: `noise_likelihood_term = -logdet_factor * Σ log det C`,
+  with `logdet_factor = 1.0` in FD (complex Whittle), `0.5` in TD and WDM
+  (real Gaussian coefficients).
+
+### TD → FD → WDM signal chain
+
+`TDSignal.wdmtransform` goes TD → FD (physical FFT above) → WDM via
+`FDSignal.wdmtransform` (`domains.py`). Per active frequency layer `m`:
+
+1. slice the FD array at bins `k = m*Nt/2 + arange(-Nt/2, Nt/2)`
+   (negative / super-Nyquist `k` mapped back hermitially), and divide by
+   `dt` (back to raw-DFT units);
+2. multiply by the WDM analysis window `φ̃(ω_k)` (Meyer-like
+   `betainc`-rolloff window from `WDMSettings.setup_window`, magnitude
+   `~sqrt(Nf/π)`, normalized so adjacent layers' `cos²/sin²` rolloffs
+   sum to 1);
+3. length-`Nt` `ifft` along the layer;
+4. `w_mn = κ * (-1)^((m+1)n) * Re[ C*_mn · ifft_result ]` with
+   `κ = 2*sqrt(π*dt)/Nf` and `C_mn = 1` (`m+n` even) or `1j` (odd);
+5. DC and Nyquist fold into the `m = 0` row (even/odd `n` slots) with a
+   `1/sqrt(2)` factor.
+
+`w_mn` is real with units `[x]/sqrt(Hz)`, so `w_mn²` has the same units
+as the one-sided PSD.
+
+### WDM-domain PSD
+
+**Convention: `S_wdm[m] = S(f_m) / 2`** — the wavelet-pixel variance is
+half the one-sided FD PSD: `E[w_mn²] = S_wdm[m]`. The factor 1/2 comes
+from the real projection in step 4 (the real part keeps half the power
+of the analytic layer signal). Both evaluation paths in
+`get_sensitivity(WDMSettings, ...)`:
+
+- `wdm_psd_method="layer_constant"`: `0.5 * sensitivity.get_Sn(f_m)` at
+  the layer centre frequencies (approximation: PSD constant per layer);
+- `wdm_psd_method="fold"` (exact): `FDSignal(S).wdmtransform(is_psd=True)`,
+  which computes `S_wdm[m] = (π / N) * Σ_k S(f_k) * φ̃²(ω_k)` over the
+  layer's FD bins — reduces to exactly `S/2` for flat `S`. Validated so
+  `E[w_mn²] == S_wdm[m]` (see `wdm_noise_validation.py`).
+
+The WDM inner product then collapses to a plain per-pixel sum:
+`<a|b> = 4 * Σ_mn (w^a_mn w^b_mn / S_wdm[m,n]) * 0.25
+       = Σ_mn w^a_mn w^b_mn / S_wdm[m,n]`,
+which matches the FD inner product of the same data to sampling error.
+
+### Complex / quadrature WDM (`is_complex=True`)
+
+Plotting-only convenience: the imaginary part is the Hilbert/quadrature
+companion of the real coefficient and carries no independent
+information. The likelihood path (`diagnostic.inner_product`) **drops
+the imaginary part**, so all likelihood quantities on the complex basis
+equal the real-WDM ones exactly; `differential_component` (0.25) and
+`logdet_factor` (0.5) are identical to the real case. Never design a
+likelihood that consumes the imaginary part. Validation:
+`complex_wdm_likelihood_validation.py`.
+
+
 ## Narrowband mismatches mm2 / mm5 (chunked-het / WDM validation)
 
 When verifying a chunked-heterodyne or other narrowband WDM template

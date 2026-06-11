@@ -308,6 +308,8 @@ class GlobalFit:
                 inds["psd"][:] = True
             if "galfor" in inds:
                 inds["galfor"][:] = True
+            if "sgwb" in inds:
+                inds["sgwb"][:] = True
             if "emri" in inds:
                 inds["emri"][:] = True
                 self.logger.debug("initializing emri inds to true")
@@ -416,11 +418,17 @@ class GlobalFit:
                     galfor_params = state.branches_coords["galfor"][0, w, 0]
                 else:
                     galfor_params = None
+                # only forward sgwb_params when the branch exists so the
+                # legacy XYZSensitivityBackend signature keeps working
+                extra_sens_kwargs = {}
+                if "sgwb" in state.branches_coords.keys():
+                    extra_sens_kwargs["sgwb_params"] = state.branches_coords["sgwb"][0, w, 0]
                 sens_here = general_info.sensitivity_backend(
                     f"walker_{w}",
                     psd_params,
                     transform_fn=self.curr.source_info["psd"].transform_fn,
                     galfor_params=galfor_params,
+                    **extra_sens_kwargs,
                 )
             else:
                 sens_here = general_info.sensitivity_backend(

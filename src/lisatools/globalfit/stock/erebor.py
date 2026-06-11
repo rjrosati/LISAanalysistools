@@ -1147,6 +1147,89 @@ def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:
     return GalForSetup(galfor_settings)
 
 
+@dataclasses.dataclass
+class SGWBSettings(Settings):
+    """Settings dataclass describing the SGWB branch in an Erebor-style recipe.
+
+    Holds the spectral-template kwargs and the leaf / dimension counts used
+    by :class:`SGWBSetup` to build the prior on the stochastic
+    gravitational-wave background. The default ``ndim=2`` matches
+    :class:`~lisatools.stochastic.PowerLawSGWB` ``(log10_A, alpha)``; other
+    templates (LogNormal, PhaseTransition) need matching ``ndim`` + priors
+    and a ``sgwb_stochastic_fn`` on the sensitivity backend.
+    """
+
+    sgwb_kwargs: typing.Dict = dataclasses.field(default_factory=dict)
+    nleaves_max: int = 1
+    nleaves_min: int = 1
+    ndim: int = 2
+    injection: Optional[np.ndarray] = None
+
+
+class SGWBSetup(Setup):
+    """:class:`Setup` for the SGWB branch in the Erebor recipe.
+
+    Args:
+        sgwb_settings: Settings dataclass with SGWB kwargs, prior, and
+            tempering configuration.
+    """
+
+    def __init__(self, sgwb_settings: SGWBSettings):
+
+        # had a better way to do this but it stopped allowing for pickle
+        super().__init__(sgwb_settings)
+
+        level = logging.DEBUG
+        name = "SGWBSetup"
+        self.logger = init_logger(filename="sgwb_setup.log", level=level, name=name, log_dir=getattr(self, 'log_dir', None))
+
+        self.init_setup()
+
+    def init_sampling_info(self):
+        """Build the SGWB prior and tempering kwargs."""
+        if self.sgwb_kwargs is None:
+            self.sgwb_kwargs = {}
+
+        if self.initialize_kwargs is None:
+            self.initialize_kwargs = {}
+
+        if self.priors is None:
+            # PowerLawSGWB: (log10_A at SGWB_FREF=25 Hz, spectral index alpha)
+            priors_sgwb = {
+                0: uniform_dist(-22.0, -18.0),  # log10_A
+                1: uniform_dist(-1.0, 2.0),  # alpha
+            }
+
+            self.priors = {"sgwb": ProbDistContainer(priors_sgwb)}
+
+        else:
+            self.logger.info("Using custom priors for SGWB branch")
+
+        if self.other_tempering_kwargs is None:
+            self.other_tempering_kwargs = dict(permute=False)
+
+        if "permute" not in self.other_tempering_kwargs:
+            self.other_tempering_kwargs["permute"] = False
+
+        assert not self.other_tempering_kwargs["permute"]
+
+    def init_setup(self):
+        """Run sampling-info initialization for the SGWB branch."""
+        self.init_sampling_info()
+
+
+def get_sgwb_erebor_settings(general_set: GeneralSetup) -> SGWBSetup:
+    """Construct the default :class:`SGWBSetup` for an Erebor run."""
+    sgwb_settings = SGWBSettings(
+        Tobs=general_set.Tobs,
+        dt=general_set.dt,
+        initialize_kwargs={},
+        log_dir=getattr(general_set, "file_store_dir", None),
+    )
+
+    return SGWBSetup(sgwb_settings)
+
+
 if __name__ == "__main__":
     # general_set = get_general_erebor_settings()
     # gb_set = get_gb_erebor_settings(general_set)
