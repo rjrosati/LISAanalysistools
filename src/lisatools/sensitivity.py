@@ -1366,36 +1366,75 @@ class SensitivityMatrixBase:
             basis_axes = full_shape[-len(self.data_shape):]
             mat_axes = full_shape[:-len(self.data_shape)]
             transpose_shape = basis_axes + mat_axes
-            self._detC = xp.linalg.det(self.sens_mat.transpose(transpose_shape))
 
             tmp = self.sens_mat.transpose(transpose_shape).reshape((-1,) + self.channel_shape)
 
-            _invC = xp.zeros_like(tmp)
+            if self.channel_shape == (3, 3):
+                # closed-form 3x3 determinant + adjugate inverse: same results
+                # as the batched-LAPACK path below but ~10x faster on CPU for
+                # the per-pixel matrices this class deals in.
+                a, b, c = tmp[:, 0, 0], tmp[:, 0, 1], tmp[:, 0, 2]
+                d, e, f = tmp[:, 1, 0], tmp[:, 1, 1], tmp[:, 1, 2]
+                g, h, i_ = tmp[:, 2, 0], tmp[:, 2, 1], tmp[:, 2, 2]
 
-            # adjust for nans in off-diagonals
-            for i in range(3):
-                for j in range(3):
-                    if i != j:
-                        tmp[np.isnan(tmp[:, i, j]), i, j] = 0.0
+                # detC from the raw matrix (before the off-diagonal NaN fix),
+                # matching xp.linalg.det of the uncleaned matrix
+                self._detC = (
+                    a * (e * i_ - f * h) - b * (d * i_ - f * g) + c * (d * h - e * g)
+                ).reshape(self.data_shape)
 
-            batch = 100000
-            inds = np.arange(0, tmp.shape[0], batch)
-            if inds[0] < tmp.shape[0]:
-                inds = np.concatenate([inds, np.array([tmp.shape[0]])])
-            inds_bad = []
-            for ind_st, ind_end in zip(inds[:-1], inds[1:]):
-                try:
-                    _invC[ind_st:ind_end] = xp.linalg.inv(tmp[ind_st:ind_end])
-                except np.linalg.LinAlgError:
-                    for i in range(ind_st, ind_end):
-                        try:
-                            _invC[i] = xp.linalg.inv(tmp[i])
-                        except np.linalg.LinAlgError:
-                            _invC[i] = 1e-100
-                            inds_bad.append(i)
-                # print(ind_st)
+                # adjust for nans in off-diagonals
+                for i in range(3):
+                    for j in range(3):
+                        if i != j:
+                            tmp[np.isnan(tmp[:, i, j]), i, j] = 0.0
 
-            inds_bad = np.asarray(inds_bad)
+                det = a * (e * i_ - f * h) - b * (d * i_ - f * g) + c * (d * h - e * g)
+                _invC = xp.empty_like(tmp)
+                _invC[:, 0, 0] = e * i_ - f * h
+                _invC[:, 0, 1] = c * h - b * i_
+                _invC[:, 0, 2] = b * f - c * e
+                _invC[:, 1, 0] = f * g - d * i_
+                _invC[:, 1, 1] = a * i_ - c * g
+                _invC[:, 1, 2] = c * d - a * f
+                _invC[:, 2, 0] = d * h - e * g
+                _invC[:, 2, 1] = b * g - a * h
+                _invC[:, 2, 2] = a * e - b * d
+                # singular pixels get the same 1e-100 sentinel as the
+                # LinAlgError fallback below
+                bad = ~xp.isfinite(det) | (det == 0.0)
+                _invC /= xp.where(bad, 1.0, det)[:, None, None]
+                if bad.any():
+                    _invC[bad] = 1e-100
+            else:
+                self._detC = xp.linalg.det(self.sens_mat.transpose(transpose_shape))
+
+                _invC = xp.zeros_like(tmp)
+
+                # adjust for nans in off-diagonals
+                for i in range(3):
+                    for j in range(3):
+                        if i != j:
+                            tmp[np.isnan(tmp[:, i, j]), i, j] = 0.0
+
+                batch = 100000
+                inds = np.arange(0, tmp.shape[0], batch)
+                if inds[0] < tmp.shape[0]:
+                    inds = np.concatenate([inds, np.array([tmp.shape[0]])])
+                inds_bad = []
+                for ind_st, ind_end in zip(inds[:-1], inds[1:]):
+                    try:
+                        _invC[ind_st:ind_end] = xp.linalg.inv(tmp[ind_st:ind_end])
+                    except np.linalg.LinAlgError:
+                        for i in range(ind_st, ind_end):
+                            try:
+                                _invC[i] = xp.linalg.inv(tmp[i])
+                            except np.linalg.LinAlgError:
+                                _invC[i] = 1e-100
+                                inds_bad.append(i)
+                    # print(ind_st)
+
+                inds_bad = np.asarray(inds_bad)
 
             invC = _invC.reshape(self.data_shape + self.channel_shape)
 
@@ -2937,6 +2976,40 @@ class InstrumentNoise(SeparableComponent):
         return C
 
 
+class PrecomputedInstrumentNoise(NoiseComponent):
+    """Instrument covariance from a cached linear basis in ``(Soms_d^2, Sa_a^2)``.
+
+    The XYZ instrument PSD is *exactly* linear in the squared noise levels:
+    ``lisanoises`` scales each term by ``model.Soms_d`` / ``model.Sa_a`` and the
+    TDI transforms are linear in the noise levels, so for any domain whose
+    evaluation is linear in the FD PSD (direct FD evaluation, and the WDM fold)
+    the covariance factorises as ``C = Soms_d^2 * basis_oms + Sa_a^2 * basis_acc``.
+    The two basis matrices are the :class:`InstrumentNoise` covariances evaluated
+    at unit squared levels — computed once and reused across walkers/proposals
+    (see :meth:`CompositeSensitivityBackend._instrument_basis`).
+
+    Only valid when non-finite FD bins are filled with ``0.0`` (a nonzero fill
+    value would break linearity at the filled bins).
+
+    Args:
+        basis_oms: Covariance at ``Soms_d^2 = 1, Sa_a^2 = 0``.
+        basis_acc: Covariance at ``Soms_d^2 = 0, Sa_a^2 = 1``.
+        Soms_d_sq: Squared OMS noise level for this instance.
+        Sa_a_sq: Squared acceleration noise level for this instance.
+    """
+
+    name = "instrument"
+
+    def __init__(self, basis_oms, basis_acc, Soms_d_sq: float, Sa_a_sq: float):
+        self.basis_oms = basis_oms
+        self.basis_acc = basis_acc
+        self.Soms_d_sq = float(Soms_d_sq)
+        self.Sa_a_sq = float(Sa_a_sq)
+
+    def covariance(self, settings: domains.DomainSettingsBase) -> np.ndarray:
+        return self.Soms_d_sq * self.basis_oms + self.Sa_a_sq * self.basis_acc
+
+
 class GalacticForeground(SeparableComponent):
     """Galactic confusion foreground with a per-element time modulation.
 
@@ -3229,6 +3302,32 @@ class CompositeSensitivityBackend:
         # ``LISAModel.lisanoises`` only reads Soms_d / Sa_a — the orbits field
         # is just a carrier here, so one shared instance is fine.
         self._orbits = lisa_models.DefaultOrbits()
+        # Lazily built (basis_oms, basis_acc) pair for
+        # :class:`PrecomputedInstrumentNoise`; see :meth:`_instrument_basis`.
+        self._instrument_basis_cache = None
+
+    def _instrument_basis(self):
+        """Build (once) and return the linear instrument-covariance basis.
+
+        Evaluates the full :class:`InstrumentNoise` covariance at unit squared
+        noise levels — ``(Soms_d^2, Sa_a^2) = (1, 0)`` and ``(0, 1)`` — so each
+        subsequent walker evaluation is a 2-term linear combination instead of
+        six domain folds.
+        """
+        if self._instrument_basis_cache is None:
+            basis = []
+            for soms_sq, sa_sq, tag in ((1.0, 0.0, "oms"), (0.0, 1.0, "acc")):
+                model = lisa_models.LISAModel(
+                    soms_sq, sa_sq, self._orbits, f"{self.model_name}:basis_{tag}"
+                )
+                comp = InstrumentNoise(
+                    tdi_generation=self.tdi_generation,
+                    model=model,
+                    fill_nans=self.instrument_fill_nans,
+                )
+                basis.append(comp.covariance(self.basis_settings))
+            self._instrument_basis_cache = tuple(basis)
+        return self._instrument_basis_cache
 
     def __call__(
         self,
@@ -3264,16 +3363,25 @@ class CompositeSensitivityBackend:
             params = np.atleast_1d(np.asarray(params).squeeze())
         Soms_d = float(params[0])
         Sa_a = float(params[1])
-        model = lisa_models.LISAModel(
-            Soms_d ** 2, Sa_a ** 2, self._orbits, f"{self.model_name}:{name}"
-        )
-        components: list[NoiseComponent] = [
-            InstrumentNoise(
+        if self.instrument_fill_nans == 0.0:
+            # instrument PSD is exactly linear in (Soms_d^2, Sa_a^2): combine
+            # the cached basis instead of re-folding six elements per call
+            basis_oms, basis_acc = self._instrument_basis()
+            instrument: NoiseComponent = PrecomputedInstrumentNoise(
+                basis_oms, basis_acc, Soms_d ** 2, Sa_a ** 2
+            )
+        else:
+            # a nonzero NaN-fill breaks linearity at the filled bins; keep the
+            # direct per-call evaluation
+            model = lisa_models.LISAModel(
+                Soms_d ** 2, Sa_a ** 2, self._orbits, f"{self.model_name}:{name}"
+            )
+            instrument = InstrumentNoise(
                 tdi_generation=self.tdi_generation,
                 model=model,
                 fill_nans=self.instrument_fill_nans,
-            ),
-        ]
+            )
+        components: list[NoiseComponent] = [instrument]
         if galfor_params is not None:
             components.append(
                 GalacticForeground(
