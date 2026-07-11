@@ -261,7 +261,11 @@ class PSDMove(GlobalFitMove, StretchMove):
         walker_inds_all = np.asarray(supps.holder["walker_inds"]).reshape(logp.shape)
         walker_inds_keep = walker_inds_all[logp_keep]
 
-        psd_coords = coords["psd"][logp_keep][:, 0]
+        # the psd branch is optional: runs with a fixed instrument-noise
+        # component (CompositeSensitivityBackend ``instrument_component``)
+        # sample only the galfor / sgwb branches.
+        has_psd = "psd" in coords
+        psd_coords = coords["psd"][logp_keep][:, 0] if has_psd else None
         has_galfor = "galfor" in coords
         galfor_coords = coords["galfor"][logp_keep][:, 0] if has_galfor else None
         has_sgwb = "sgwb" in coords
@@ -277,10 +281,11 @@ class PSDMove(GlobalFitMove, StretchMove):
                 w = int(walker_idx)
                 if w not in original_sens:
                     original_sens[w] = self.acs[w].sens_mat
+                psd_here = None if not has_psd else psd_coords[row]
                 galfor_here = None if not has_galfor else galfor_coords[row]
                 sgwb_here = None if not has_sgwb else sgwb_coords[row]
                 self.acs[w].sens_mat = self._build_sensitivity_for_walker(
-                    w, psd_coords[row], galfor_here, sgwb_here
+                    w, psd_here, galfor_here, sgwb_here
                 )
             self.acs.reset_linear_psd_arr()
             walker_ll = self.acs.likelihood()
@@ -466,7 +471,8 @@ class PSDMove(GlobalFitMove, StretchMove):
         # breakpoint()
         # logp = model.compute_log_prior_fn(state.branches_coords, inds=state.branches_inds, supps=state.supplemental)
         # logl_test = self.compute_log_like(state.branches_coords, inds=state.branches_inds, supps=state.supplemental, logp=logp)
-        tmp_coords_check = state.branches["psd"].coords[0, :, 0].copy()
+        if "psd" in state.branches:
+            tmp_coords_check = state.branches["psd"].coords[0, :, 0].copy()
         tmp_model = Model(
             state,
             self.compute_log_like,
@@ -502,7 +508,10 @@ class PSDMove(GlobalFitMove, StretchMove):
         # TODO: check speed of this? (needed?)
         nwalkers = len(self.acs)
         for w in range(nwalkers):
-            psd_params = new_state.branches_coords["psd"][0, w, 0]
+            if "psd" in new_state.branches_coords:
+                psd_params = new_state.branches_coords["psd"][0, w, 0]
+            else:
+                psd_params = None
             if "galfor" in new_state.branches_coords:
                 galfor_params = new_state.branches_coords["galfor"][0, w, 0]
             else:

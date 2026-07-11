@@ -3010,6 +3010,201 @@ class PrecomputedInstrumentNoise(NoiseComponent):
         return self.Soms_d_sq * self.basis_oms + self.Sa_a_sq * self.basis_acc
 
 
+class TabulatedSensitivity:
+    """PSD element interpolated from tabulated values (e.g. file noise estimates).
+
+    Duck-types the piece of the :class:`Sensitivity` interface that
+    :func:`get_sensitivity` consumes (``get_Sn``), so a tabulated spectrum flows
+    through the same domain dispatch as the analytic models (direct FD
+    evaluation, WDM ``fold`` / ``layer_constant``, and any domain added later).
+
+    Interpolation is linear in ``log10(f)`` on the *values* (the values are not
+    logged, so cross-spectra — which may be negative — are supported).
+    Frequencies outside the tabulated band clamp to the edge values;
+    non-positive frequencies return NaN, matching the stock sensitivities'
+    ``f = 0`` behavior (handled downstream by ``fill_nans``).
+
+    Args:
+        f_tab: Tabulated frequencies, strictly positive and increasing, shape
+            ``(nF,)``.
+        S_tab: Tabulated PSD values: ``(nF,)`` stationary, or ``(nT, nF)``
+            time-dependent (requires ``t_tab``).
+        t_tab: Times of the ``(nT, nF)`` rows, on the same time coordinate as
+            the domain the values will be evaluated on (``t = 0`` at data
+            start).
+    """
+
+    channel: str = "tabulated"
+
+    def __init__(self, f_tab, S_tab, t_tab=None):
+        self.f_tab = np.asarray(asnumpy(f_tab), dtype=float)
+        self.S_tab = np.real(np.asarray(asnumpy(S_tab))).astype(float)
+        self.t_tab = None if t_tab is None else np.asarray(asnumpy(t_tab), dtype=float)
+        if np.any(self.f_tab <= 0.0):
+            raise ValueError("f_tab must be strictly positive.")
+        if self.t_tab is None:
+            if self.S_tab.ndim != 1 or self.S_tab.shape[0] != self.f_tab.shape[0]:
+                raise ValueError("S_tab must have shape (nF,) when t_tab is None.")
+        else:
+            if self.S_tab.shape != (self.t_tab.shape[0], self.f_tab.shape[0]):
+                raise ValueError("S_tab must have shape (nT, nF) matching t_tab / f_tab.")
+        self._logf_tab = np.log10(self.f_tab)
+
+    def _row(self, t: Optional[float]) -> np.ndarray:
+        """The ``(nF,)`` spectrum at time ``t`` (time-interpolated / averaged)."""
+        if self.t_tab is None:
+            return self.S_tab
+        if t is None:
+            # no time information available (e.g. an FD evaluation of a
+            # time-dependent table): fall back to the time average
+            return self.S_tab.mean(axis=0)
+        t = float(t)
+        # linear interpolation in time, clamped to the tabulated range
+        if t <= self.t_tab[0]:
+            return self.S_tab[0]
+        if t >= self.t_tab[-1]:
+            return self.S_tab[-1]
+        i = int(np.searchsorted(self.t_tab, t))
+        w = (t - self.t_tab[i - 1]) / (self.t_tab[i] - self.t_tab[i - 1])
+        return (1.0 - w) * self.S_tab[i - 1] + w * self.S_tab[i]
+
+    def get_Sn(self, f, t: Optional[float] = None, **kwargs) -> float | np.ndarray:
+        """Interpolated PSD at frequencies ``f`` (and, optionally, time ``t``)."""
+        xp = Sensitivity.get_xp(f)
+        scalar = np.ndim(f) == 0
+        f_np = np.atleast_1d(np.asarray(asnumpy(f), dtype=float))
+        out = np.full(f_np.shape, np.nan)
+        good = f_np > 0.0
+        out[good] = np.interp(np.log10(f_np[good]), self._logf_tab, self._row(t))
+        if scalar:
+            return float(out[0])
+        return xp.asarray(out)
+
+
+class TabulatedNoise(NoiseComponent):
+    """Noise covariance from tabulated per-element spectra (e.g. HDF5 noise estimates).
+
+    Wraps a tabulated (optionally time-dependent) channel-channel covariance —
+    e.g. the ``noise_estimates`` group of a Mojito L1 file — as a fixed
+    :class:`NoiseComponent`. Each unique element is interpolated by a
+    :class:`TabulatedSensitivity` and folded into the requested domain through
+    :func:`get_sensitivity`, so every domain that dispatch supports works here
+    (direct FD evaluation, WDM ``fold`` / ``layer_constant``, ...).
+
+    Time dependence: with ``t_tab`` given, WDM evaluations use the
+    non-stationary path (one tabulated spectrum per wavelet time column,
+    linearly interpolated in time and clamped at the tabulated edges); domains
+    without a time axis (FD) use the time-averaged spectra.
+
+    Units: the tabulated values are used as-is apart from ``scale``. When
+    combining with the lisatools stochastic components (galactic foreground /
+    SGWB, which are in the fractional-frequency convention), make sure the
+    tabulated covariance is converted to the same convention — e.g. Mojito
+    noise estimates accompanying ``xyz_doppler`` data need
+    ``scale = 1 / laser_frequency**2``.
+
+    Args:
+        f_tab: Tabulated frequencies ``(nF,)``, strictly positive, increasing.
+        cov_tab: Covariance table: ``(nF, nch, nch)`` stationary, or
+            ``(nT, nF, nch, nch)`` time-dependent (the Mojito
+            ``noise_estimates/XYZ`` layout). Complex input is reduced with
+            ``.real`` — the real part is the symmetric covariance relevant to
+            real-coefficient bases (FD cross-phase information is dropped).
+        t_tab: Times for the leading axis of ``cov_tab``, on the same time
+            coordinate as the target domain (``t = 0`` at data start).
+        scale: Overall multiplicative factor applied to the covariance (unit
+            conversion; see above). Default ``1.0``.
+        fill_nans: Fill value for non-finite cells (default ``0.0``, matching
+            :class:`CompositeSensitivityBackend`'s instrument default; the
+            zeroed cells get filtered by the ``detC`` mask downstream).
+        wdm_psd_method: Forwarded to :func:`get_sensitivity` for WDM domains
+            (``"fold"`` exact / ``"layer_constant"`` fast approximation). The
+            time-dependent WDM path repeats the evaluation per wavelet time
+            column, so ``"layer_constant"`` is recommended there.
+    """
+
+    name = "instrument"
+
+    def __init__(
+        self,
+        f_tab,
+        cov_tab,
+        t_tab=None,
+        scale: float = 1.0,
+        fill_nans: float = 0.0,
+        wdm_psd_method: str = "fold",
+    ):
+        cov = np.real(np.asarray(asnumpy(cov_tab))).astype(float) * float(scale)
+        expected_ndim = 3 if t_tab is None else 4
+        if cov.ndim != expected_ndim:
+            raise ValueError(
+                f"cov_tab must be {expected_ndim}D "
+                f"({'(nF, nch, nch)' if t_tab is None else '(nT, nF, nch, nch)'}), "
+                f"got shape {cov.shape}."
+            )
+        if cov.shape[-1] != cov.shape[-2]:
+            raise ValueError(f"cov_tab trailing axes must be square, got shape {cov.shape}.")
+        self.nchannels = int(cov.shape[-1])
+        self.f_tab = np.asarray(asnumpy(f_tab), dtype=float)
+        self.t_tab = None if t_tab is None else np.asarray(asnumpy(t_tab), dtype=float)
+        self.cov_tab = cov
+        self.fill_nans = fill_nans
+        self.wdm_psd_method = wdm_psd_method
+        # one interpolant per unique (upper-triangle) element
+        self._elements = {}
+        for i in range(self.nchannels):
+            for j in range(i, self.nchannels):
+                self._elements[(i, j)] = TabulatedSensitivity(
+                    self.f_tab, cov[..., i, j], t_tab=self.t_tab
+                )
+
+    def covariance(self, settings: domains.DomainSettingsBase) -> np.ndarray:
+        xp = settings.xp
+        nch = self.nchannels
+        sens_kwargs: dict = dict(
+            fill_nans=self.fill_nans, wdm_psd_method=self.wdm_psd_method
+        )
+        if self.t_tab is not None and isinstance(settings, domains.WDMSettings):
+            # non-stationary WDM: one tabulated spectrum per wavelet time
+            # column (get_sensitivity indexes the full Nt grid and slices the
+            # active columns internally).
+            t_cols = np.arange(settings.Nt) * settings.layer_dt
+            sens_kwargs.update(
+                stationary=False,
+                kwargs_list=[dict(t=float(t)) for t in t_cols],
+            )
+        # (other domains: TabulatedSensitivity falls back to the time average
+        # when no per-column time is supplied)
+        C = None
+        for (i, j), elem in self._elements.items():
+            arr = get_sensitivity(settings, sens_fn=elem, **sens_kwargs)
+            if C is None:
+                C = xp.zeros(
+                    (nch, nch) + tuple(settings.basis_shape_active), dtype=arr.dtype
+                )
+            C[i, j] = arr
+            if i != j:
+                C[j, i] = arr
+        return C
+
+
+class PrecomputedNoise(NoiseComponent):
+    """A fixed, already-evaluated covariance contribution.
+
+    Thin wrapper holding a precomputed ``(nch, nch, *basis_shape_active)``
+    array so per-call composite rebuilds skip re-evaluating an expensive fixed
+    component (see :class:`CompositeSensitivityBackend`'s
+    ``instrument_component``).
+    """
+
+    def __init__(self, cov: np.ndarray, name: str = "instrument"):
+        self.cov = cov
+        self.name = name
+
+    def covariance(self, settings: domains.DomainSettingsBase) -> np.ndarray:
+        return self.cov
+
+
 class GalacticForeground(SeparableComponent):
     """Galactic confusion foreground with a per-element time modulation.
 
@@ -3248,7 +3443,9 @@ class CompositeSensitivityBackend:
     object can be slotted into ``GeneralSetup.sensitivity_backend`` without any
     changes in the global-fit run/move code. Each call returns a fresh
     :class:`CompositeSensitivityMatrix` that sums an :class:`InstrumentNoise`
-    component (rebuilt with the walker's Soms_d / Sa_a) and optionally a
+    component (rebuilt with the walker's Soms_d / Sa_a — or, when
+    ``instrument_component`` is set, a fixed non-sampled component such as a
+    :class:`TabulatedNoise` built from file noise estimates) and optionally a
     :class:`GalacticForeground` component (when ``galfor_params`` is supplied),
     plus any extra stationary components passed at construction.
 
@@ -3274,6 +3471,13 @@ class CompositeSensitivityBackend:
         sgwb_stochastic_fn: SGWB spectral-template class or stock name used
             for the optional :class:`SGWB` component (only used when the
             caller supplies ``sgwb_params``).
+        instrument_component: Optional fixed (non-sampled) instrument-noise
+            component — e.g. a :class:`TabulatedNoise` built from a data
+            file's noise estimates. When set, it replaces the parametric
+            :class:`InstrumentNoise` entirely: ``psd_params`` is ignored on
+            every call (it may be ``None``) and the component's covariance is
+            evaluated once and reused across walkers. The galactic-foreground
+            and SGWB components remain separately enablable per call.
         extra_components: Additional :class:`NoiseComponent` instances added
             to every constructed matrix — e.g. a stationary SGWB. These are
             held by reference so they're built once and reused.
@@ -3289,6 +3493,7 @@ class CompositeSensitivityBackend:
         galfor_stochastic_fn=HyperbolicTangentGalacticForeground,
         galfor_modulation: Optional[object] = None,
         sgwb_stochastic_fn="PowerLawSGWB",
+        instrument_component: Optional[NoiseComponent] = None,
         extra_components: Optional[Sequence[NoiseComponent]] = None,
     ):
         self.basis_settings = settings
@@ -3298,6 +3503,7 @@ class CompositeSensitivityBackend:
         self.galfor_stochastic_fn = galfor_stochastic_fn
         self.galfor_modulation = galfor_modulation
         self.sgwb_stochastic_fn = sgwb_stochastic_fn
+        self.instrument_component = instrument_component
         self.extra_components = list(extra_components) if extra_components else []
         # ``LISAModel.lisanoises`` only reads Soms_d / Sa_a — the orbits field
         # is just a carrier here, so one shared instance is fine.
@@ -3305,6 +3511,9 @@ class CompositeSensitivityBackend:
         # Lazily built (basis_oms, basis_acc) pair for
         # :class:`PrecomputedInstrumentNoise`; see :meth:`_instrument_basis`.
         self._instrument_basis_cache = None
+        # Lazily evaluated covariance of a fixed ``instrument_component``
+        # (its parameters never change, so one evaluation serves all walkers).
+        self._instrument_component_cache = None
 
     def _instrument_basis(self):
         """Build (once) and return the linear instrument-covariance basis.
@@ -3342,7 +3551,9 @@ class CompositeSensitivityBackend:
         Args:
             name: Identifier (e.g. ``"walker_3"``) recorded on the LISAModel.
             psd_params: ``[Soms_d, Sa_a]`` in linear (square-root) units, matching
-                the convention used by :class:`XYZSensitivityBackend`.
+                the convention used by :class:`XYZSensitivityBackend`. Ignored
+                (and allowed to be ``None``) when the backend was constructed
+                with a fixed ``instrument_component``.
             galfor_params: Optional galactic-foreground parameters. When given,
                 a :class:`GalacticForeground` component is added (with the
                 backend's ``galfor_modulation``).
@@ -3355,32 +3566,45 @@ class CompositeSensitivityBackend:
         Returns:
             A freshly built :class:`CompositeSensitivityMatrix`.
         """
-        params = np.asarray(psd_params, dtype=float)
-        if transform_fn is not None:
-            params = transform_fn.both_transforms(
-                params, copy=True, return_transpose=False
-            )
-            params = np.atleast_1d(np.asarray(params).squeeze())
-        Soms_d = float(params[0])
-        Sa_a = float(params[1])
-        if self.instrument_fill_nans == 0.0:
-            # instrument PSD is exactly linear in (Soms_d^2, Sa_a^2): combine
-            # the cached basis instead of re-folding six elements per call
-            basis_oms, basis_acc = self._instrument_basis()
-            instrument: NoiseComponent = PrecomputedInstrumentNoise(
-                basis_oms, basis_acc, Soms_d ** 2, Sa_a ** 2
+        if self.instrument_component is not None:
+            # fixed (non-sampled) instrument noise, e.g. tabulated file
+            # estimates: evaluate the component once and reuse the resulting
+            # array across walkers / proposals; ``psd_params`` is ignored.
+            if self._instrument_component_cache is None:
+                self._instrument_component_cache = self.instrument_component.covariance(
+                    self.basis_settings
+                )
+            instrument: NoiseComponent = PrecomputedNoise(
+                self._instrument_component_cache,
+                name=getattr(self.instrument_component, "name", "instrument"),
             )
         else:
-            # a nonzero NaN-fill breaks linearity at the filled bins; keep the
-            # direct per-call evaluation
-            model = lisa_models.LISAModel(
-                Soms_d ** 2, Sa_a ** 2, self._orbits, f"{self.model_name}:{name}"
-            )
-            instrument = InstrumentNoise(
-                tdi_generation=self.tdi_generation,
-                model=model,
-                fill_nans=self.instrument_fill_nans,
-            )
+            params = np.asarray(psd_params, dtype=float)
+            if transform_fn is not None:
+                params = transform_fn.both_transforms(
+                    params, copy=True, return_transpose=False
+                )
+                params = np.atleast_1d(np.asarray(params).squeeze())
+            Soms_d = float(params[0])
+            Sa_a = float(params[1])
+            if self.instrument_fill_nans == 0.0:
+                # instrument PSD is exactly linear in (Soms_d^2, Sa_a^2): combine
+                # the cached basis instead of re-folding six elements per call
+                basis_oms, basis_acc = self._instrument_basis()
+                instrument = PrecomputedInstrumentNoise(
+                    basis_oms, basis_acc, Soms_d ** 2, Sa_a ** 2
+                )
+            else:
+                # a nonzero NaN-fill breaks linearity at the filled bins; keep the
+                # direct per-call evaluation
+                model = lisa_models.LISAModel(
+                    Soms_d ** 2, Sa_a ** 2, self._orbits, f"{self.model_name}:{name}"
+                )
+                instrument = InstrumentNoise(
+                    tdi_generation=self.tdi_generation,
+                    model=model,
+                    fill_nans=self.instrument_fill_nans,
+                )
         components: list[NoiseComponent] = [instrument]
         if galfor_params is not None:
             components.append(

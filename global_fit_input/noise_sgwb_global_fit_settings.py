@@ -5,6 +5,12 @@ galactic foreground (with a fixed GLASS per-element time modulation), and a
 2-parameter power-law SGWB, all through the WDM-domain
 :class:`CompositeSensitivityBackend`.
 
+The instrument-noise model is selectable (``INSTRUMENT_NOISE_MODEL`` below):
+either the sampled 2-parameter model above, or the *fixed* noise estimates
+stored in a Mojito L1 file's ``noise_estimates`` group (no psd branch is then
+sampled). The confusion-noise (galfor) and SGWB components are separately
+enablable via ``INCLUDE_GALFOR`` / ``INCLUDE_SGWB`` in either mode.
+
 The data are a synthetic noise realization Cholesky-drawn from the *injected*
 composite covariance (instrument + modulated foreground + SGWB), so the run
 is a self-consistent end-to-end recovery test. Swap
@@ -51,7 +57,7 @@ from lisatools.globalfit.stock.erebor import (
     GalForSetup, GalForSettings,
     SGWBSetup, SGWBSettings,
 )
-from lisatools.sensitivity import CompositeSensitivityBackend
+from lisatools.sensitivity import CompositeSensitivityBackend, TabulatedNoise
 from lisatools.domains import TDSettings, TDSignal, WDMSettings, WDMSignal
 from lisatools.utils.utility import asnumpy
 
@@ -80,6 +86,126 @@ NOISE_SEED = 0
 
 # GLASS modulation file (tuned to match Sangria's galaxy orientation).
 MODULATION_FILE = str(Path(__file__).resolve().parent.parent / "modulation.dat")
+
+
+# ============================================================
+# *** Noise / component model selection ***
+# ============================================================
+# Instrument-noise model:
+#   "sampled" — 2-parameter (Soms_d, Sa_a) instrument PSD sampled by the
+#               "psd" branch (the original behavior).
+#   "file"    — fixed noise estimates read from the ``noise_estimates`` group
+#               of NOISE_ESTIMATE_FILE (Mojito L1 layout). No "psd" branch is
+#               sampled; the synthetic data draw uses the same fixed
+#               covariance, so the run recovers galfor/SGWB on top of the
+#               file noise.
+INSTRUMENT_NOISE_MODEL = "sampled"
+NOISE_ESTIMATE_FILE = str(
+    Path(__file__).resolve().parent.parent.parent
+    / "NOISE_731d_2.5s_L1_source0_0_20251206T220508924302Z.h5"
+)
+# Use the file estimates' daily time dependence (WDM domain; FD falls back to
+# the time average automatically). "layer_constant" keeps the per-column WDM
+# evaluation cheap; switch to "fold" for the exact (much slower) fold.
+NOISE_ESTIMATE_TIME_DEPENDENT = True
+NOISE_ESTIMATE_WDM_PSD_METHOD = "layer_constant"
+
+# Confusion noise (galactic foreground) and SGWB are separately enablable
+# regardless of the instrument-noise choice: each toggle controls both the
+# injection into the synthetic data and the sampled branch.
+INCLUDE_GALFOR = True
+INCLUDE_SGWB = True
+
+
+class FileNoiseEstimates:
+    """Lazy, picklable :class:`TabulatedNoise` from a Mojito ``noise_estimates`` group.
+
+    Duck-types the :class:`NoiseComponent` interface (``name``, ``nchannels``,
+    ``covariance``) so it can be handed directly to
+    ``CompositeSensitivityBackend(instrument_component=...)`` and to the
+    synthetic-data processor. The HDF5 payload (~50 MB) is loaded on first
+    use, so instances pickle cheaply across MPI ranks (same pattern as
+    :class:`GlassModulation`).
+
+    The stored covariance accompanies the file's ``xyz_doppler`` data, which
+    mojito normalizes by the laser frequency — so the estimates are scaled by
+    ``1 / laser_frequency**2`` here, putting them in the same
+    fractional-frequency convention as the lisatools galfor/SGWB components.
+    The estimate times are shifted onto the analysis time coordinate
+    (``t = 0`` at the TDI data start).
+    """
+
+    name = "instrument"
+    nchannels = 3
+
+    def __init__(
+        self,
+        path: str,
+        dataset: str = "XYZ",
+        time_dependent: bool = True,
+        wdm_psd_method: str = "layer_constant",
+    ):
+        self.path = path
+        self.dataset = dataset
+        self.time_dependent = time_dependent
+        self.wdm_psd_method = wdm_psd_method
+        self._component = None
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_component"] = None  # reload lazily on the receiving rank
+        return state
+
+    def component(self) -> TabulatedNoise:
+        if self._component is None:
+            import h5py
+
+            with h5py.File(self.path, "r") as f:
+                grp = f["noise_estimates"]
+                cov = grp[self.dataset][:]  # (nT, nF, nch, nch), complex
+                fa = grp["log_frequency_sampling"].attrs
+                f_tab = np.logspace(
+                    np.log10(float(fa["fmin"])), np.log10(float(fa["fmax"])), int(fa["size"])
+                )
+                sa = grp["sampling"].attrs
+                t_tab = float(sa["t0"]) + np.arange(int(sa["size"])) * float(sa["dt"])
+                # analysis domains use t = 0 at the data start
+                t_tab = t_tab - float(f["tdis"]["sampling"].attrs["t0"])
+                scale = 1.0 / float(f.attrs["laser_frequency"]) ** 2
+            if not self.time_dependent:
+                cov = cov.mean(axis=0)
+                t_tab = None
+            self._component = TabulatedNoise(
+                f_tab,
+                cov,
+                t_tab=t_tab,
+                scale=scale,
+                wdm_psd_method=self.wdm_psd_method,
+            )
+        return self._component
+
+    def covariance(self, settings):
+        return self.component().covariance(settings)
+
+
+def get_instrument_component():
+    """Resolve ``INSTRUMENT_NOISE_MODEL`` into a fixed component (or ``None``).
+
+    ``None`` means the sampled 2-parameter instrument model (a "psd" branch is
+    created); a component means the instrument noise is fixed and only the
+    enabled galfor/SGWB branches are sampled.
+    """
+    if INSTRUMENT_NOISE_MODEL == "sampled":
+        return None
+    if INSTRUMENT_NOISE_MODEL == "file":
+        return FileNoiseEstimates(
+            NOISE_ESTIMATE_FILE,
+            time_dependent=NOISE_ESTIMATE_TIME_DEPENDENT,
+            wdm_psd_method=NOISE_ESTIMATE_WDM_PSD_METHOD,
+        )
+    raise ValueError(
+        f"INSTRUMENT_NOISE_MODEL must be 'sampled' or 'file', got {INSTRUMENT_NOISE_MODEL!r}."
+    )
 
 
 class GlassModulation:
@@ -122,23 +248,38 @@ class SyntheticCompositeNoiseProcessor:
     composite covariance on the active WDM grid and Cholesky-draws one noise
     realization per pixel (the same construction as noise_mcmc_validate.py).
     The TD window is ignored — the draw lives directly in the WDM basis.
+
+    The instrument part of the injected covariance is either the sampled
+    2-parameter model (``psd_injection``) or a fixed component such as
+    :class:`FileNoiseEstimates` (``instrument_component``) — exactly one of
+    the two must be given, mirroring the sensitivity backend used in the fit.
     """
 
     def __init__(
         self,
         Tobs: float,
         dt: float,
-        psd_injection,
+        psd_injection=None,
         galfor_injection=None,
         sgwb_injection=None,
         galfor_modulation=None,
         sgwb_stochastic_fn="PowerLawSGWB",
+        instrument_component=None,
         tdi_generation: int = 2,
         seed: int = 0,
     ):
         self.Tobs = Tobs
         self.dt = dt
-        self.psd_injection = np.asarray(psd_injection, dtype=float)
+        # exactly one instrument-noise source: the 2-parameter injection or a
+        # fixed component (e.g. FileNoiseEstimates)
+        if (psd_injection is None) == (instrument_component is None):
+            raise ValueError(
+                "Provide exactly one of psd_injection (sampled instrument model) "
+                "or instrument_component (fixed instrument noise)."
+            )
+        self.psd_injection = (
+            None if psd_injection is None else np.asarray(psd_injection, dtype=float)
+        )
         self.galfor_injection = (
             None if galfor_injection is None else np.asarray(galfor_injection, dtype=float)
         )
@@ -147,6 +288,7 @@ class SyntheticCompositeNoiseProcessor:
         )
         self.galfor_modulation = galfor_modulation
         self.sgwb_stochastic_fn = sgwb_stochastic_fn
+        self.instrument_component = instrument_component
         self.tdi_generation = tdi_generation
         self.seed = seed
 
@@ -155,6 +297,9 @@ class SyntheticCompositeNoiseProcessor:
             psd_injection=self.psd_injection,
             galfor_injection=self.galfor_injection,
             sgwb_injection=self.sgwb_injection,
+            instrument_component=(
+                None if instrument_component is None else repr(instrument_component.__dict__)
+            ),
             seed=seed,
         )
 
@@ -180,6 +325,7 @@ class SyntheticCompositeNoiseProcessor:
             tdi_generation=self.tdi_generation,
             galfor_modulation=self.galfor_modulation,
             sgwb_stochastic_fn=self.sgwb_stochastic_fn,
+            instrument_component=self.instrument_component,
         )
         sensmat = backend(
             "injection",
@@ -263,7 +409,10 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         live_dangerously=True,
         temperature_control=temperature_control,
         sensitivity_backend=general_info.sensitivity_backend,
-        psd_transform_fn=curr.source_info["psd"].transform_fn,
+        # no psd branch when the instrument noise is fixed from file
+        psd_transform_fn=(
+            curr.source_info["psd"].transform_fn if "psd" in curr.source_info else None
+        ),
     )
 
     psd_search_move = PSDMove(
@@ -395,14 +544,20 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     domain_settings = DOMAIN_CHOICE
 
+    # None -> sampled 2-parameter instrument model; component -> fixed noise
+    # estimates from the file (no psd branch). Galfor/SGWB injections follow
+    # their own toggles independently.
+    instrument_component = get_instrument_component()
+
     processor_init_kwargs = dict(
         Tobs=Tobs,
         dt=dt,
-        psd_injection=PSD_INJECTION,
-        galfor_injection=GALFOR_INJECTION,
-        sgwb_injection=SGWB_INJECTION,
+        psd_injection=PSD_INJECTION if instrument_component is None else None,
+        galfor_injection=GALFOR_INJECTION if INCLUDE_GALFOR else None,
+        sgwb_injection=SGWB_INJECTION if INCLUDE_SGWB else None,
         galfor_modulation=GALFOR_MODULATION,
         sgwb_stochastic_fn=SGWB_STOCHASTIC_FN,
+        instrument_component=instrument_component,
         tdi_generation=2,
         seed=NOISE_SEED,
     )
@@ -418,11 +573,20 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     # CompositeSensitivityBackend consumes these directly. The galfor
     # modulation is the same fixed GLASS modulation used in the injection;
-    # the sampled foreground parameters scale the modulated template.
+    # the sampled foreground parameters scale the modulated template. A fixed
+    # instrument component (file mode) replaces the sampled instrument model.
     sensitivity_init_kwargs = dict(
         tdi_generation=2,
         galfor_modulation=GALFOR_MODULATION,
         sgwb_stochastic_fn=SGWB_STOCHASTIC_FN,
+        instrument_component=instrument_component,
+    )
+
+    # With a fixed instrument component there is no psd branch; these kwargs
+    # are what run.py hands the sensitivity backend in that case (the sampled
+    # galfor/sgwb branch coordinates are merged in per walker).
+    fixed_psd_kwargs = (
+        dict(psd_params=None) if instrument_component is not None else None
     )
 
     general_settings = GeneralSettings(
@@ -445,6 +609,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         processor_init_kwargs=processor_init_kwargs,
         preprocess_kwargs=preprocess_kwargs,
         sensitivity_init_kwargs=sensitivity_init_kwargs,
+        fixed_psd_kwargs=fixed_psd_kwargs,
     )
 
     general_setup = GeneralSetup(general_settings)
@@ -477,20 +642,28 @@ def get_global_fit_settings(copy_settings_file=False):
     ###  Branch settings  ############
     ##################################
 
-    psd_setup = get_psd_erebor_settings(general_setup)
-    galfor_setup = get_galfor_erebor_settings(general_setup)
-    sgwb_setup = get_sgwb_erebor_settings(general_setup)
+    # Branch lineup follows the model toggles: no psd branch when the
+    # instrument noise is fixed from file; galfor / sgwb independently
+    # enablable in either mode.
+    source_info = {}
+    if INSTRUMENT_NOISE_MODEL == "sampled":
+        source_info["psd"] = get_psd_erebor_settings(general_setup)
+    if INCLUDE_GALFOR:
+        source_info["galfor"] = get_galfor_erebor_settings(general_setup)
+    if INCLUDE_SGWB:
+        source_info["sgwb"] = get_sgwb_erebor_settings(general_setup)
+    if not source_info:
+        raise ValueError(
+            "No sampled branches: enable at least one of the sampled instrument "
+            "model (INSTRUMENT_NOISE_MODEL='sampled'), INCLUDE_GALFOR, or INCLUDE_SGWB."
+        )
 
     ##############
     ## READ OUT ##
     ##############
 
     global_settings = GlobalFitSettings(
-        source_info={
-            "psd": psd_setup,
-            "galfor": galfor_setup,
-            "sgwb": sgwb_setup,
-        },
+        source_info=source_info,
         general_info=general_setup,
         rank_info=rank_info,
         setup_function=setup_recipe,

@@ -341,7 +341,8 @@ def gpc_to_mpc(x):
     return x * 1e3
 
 
-from bbhx.utils.transform import LISA_to_SSB, mT_q  # used by MBHSetup.init_sampling_info
+# NB: ``bbhx`` is imported lazily inside MBHSetup.init_sampling_info so that
+# runs without an MBH branch (e.g. noise/SGWB-only) don't require it.
 from eryn.moves import Move
 
 from ..hdfbackend import MBHHDFBackend
@@ -380,6 +381,8 @@ class MBHSetup(Setup):
 
     def init_sampling_info(self):
         """Build the MBH :class:`TransformContainer`, prior, periodicity, and waveform kwargs."""
+        from bbhx.utils.transform import LISA_to_SSB, mT_q
+
         # input_basis = [
         #     "logM",
         #     "q",

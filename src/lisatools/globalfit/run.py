@@ -431,8 +431,16 @@ class GlobalFit:
                     **extra_sens_kwargs,
                 )
             else:
+                # no sampled psd branch (e.g. a fixed instrument-noise
+                # component); the galfor / sgwb branches may still be sampled
+                # and must flow through per walker.
+                fixed_kwargs = dict(general_info.fixed_psd_kwargs)
+                if "galfor" in state.branches_coords.keys():
+                    fixed_kwargs["galfor_params"] = state.branches_coords["galfor"][0, w, 0]
+                if "sgwb" in state.branches_coords.keys():
+                    fixed_kwargs["sgwb_params"] = state.branches_coords["sgwb"][0, w, 0]
                 sens_here = general_info.sensitivity_backend(
-                    f"walker_{w}", **general_info.fixed_psd_kwargs
+                    f"walker_{w}", **fixed_kwargs
                 )
 
             acs_tmp.append(AnalysisContainer(deepcopy(data_res_arr), deepcopy(sens_here)))
